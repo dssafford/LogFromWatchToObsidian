@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import subprocess
 import sys
+import tempfile
 import time
+import os
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -35,67 +37,80 @@ file_handler.setFormatter(logging.Formatter(
 log.addHandler(file_handler)
 
 
-def wake_reminders() -> bool:
-    """Wake the Reminders app to avoid timeout on first query."""
-    log.info("Waking Reminders app...")
-    # Use open command via shell script - works better from automation contexts
-    script = '''
-do shell script "open -a Reminders -g"
-delay 2
-'''
-    success, _ = run_applescript(script, "Wake Reminders")
-    if not success:
-        log.warning("Wake via AppleScript failed, trying direct open command")
-        try:
-            subprocess.run(["/usr/bin/open", "-a", "Reminders", "-g"], timeout=10)
-            time.sleep(2)
-        except Exception as e:
-            log.warning(f"Direct open also failed: {e}")
-    # Return true regardless - the main query will fail if app isn't available
-    return True
-
-
-def get_reminders_script():
-    """Returns AppleScript that fetches reminders with their IDs."""
+def get_reminders_applescript():
+    """Returns AppleScript to fetch reminders."""
     return f'''
 tell application "Reminders"
-    set captureList to list "{REMINDERS_LIST}"
-    set output to ""
-    repeat with r in (reminders in captureList whose completed is false)
-        set ts to creation date of r
-        set rid to id of r
-        set output to output & rid & "|" & (ts as «class isot» as string) & "|" & name of r & linefeed
-    end repeat
-    return output
+set output to ""
+set allLists to lists
+repeat with aList in allLists
+if name of aList is "{REMINDERS_LIST}" then
+set incompleteReminders to (reminders of aList whose completed is false)
+repeat with r in incompleteReminders
+set remId to id of r
+set remName to name of r
+set remCreated to creation date of r
+set y to year of remCreated
+set m to text -2 thru -1 of ("0" & (month of remCreated as integer))
+set d to text -2 thru -1 of ("0" & day of remCreated)
+set h to text -2 thru -1 of ("0" & hours of remCreated)
+set mins to text -2 thru -1 of ("0" & minutes of remCreated)
+set s to text -2 thru -1 of ("0" & seconds of remCreated)
+set isoDate to y & "-" & m & "-" & d & "T" & h & ":" & mins & ":" & s & "Z"
+set output to output & remId & "|" & isoDate & "|" & remName & linefeed
+end repeat
+end if
+end repeat
 end tell
+return output
 '''
 
 
-def mark_specific_reminders_complete_script(reminder_ids: list[str]):
-    """Returns AppleScript that marks specific reminders complete by ID."""
+def mark_reminders_complete_applescript(reminder_ids: list[str]):
+    """Returns AppleScript to mark specific reminders complete by ID."""
+    # Build AppleScript list of IDs
     ids_list = ", ".join(f'"{rid}"' for rid in reminder_ids)
     return f'''
+set targetIds to {{{ids_list}}}
+set markedCount to 0
 tell application "Reminders"
-    set targetIds to {{{ids_list}}}
-    set markedCount to 0
     repeat with targetId in targetIds
         try
-            set r to first reminder whose id is targetId
+            set r to reminder id targetId
             set completed of r to true
             set markedCount to markedCount + 1
         end try
     end repeat
-    return markedCount
 end tell
+return markedCount
 '''
 
 
 def run_applescript(script: str, description: str) -> tuple[bool, str]:
-    """Run an AppleScript and return (success, output/error)."""
+    """Run AppleScript by pre-compiling it first."""
     log.debug(f"Running AppleScript: {description}")
+    source_path = Path("/tmp/reminders_script.applescript")
+    compiled_path = Path("/tmp/reminders_script.scpt")
     try:
+        # Write source script
+        script_content = script.strip()
+        source_path.write_text(script_content, encoding='utf-8')
+        log.info(f"Script written to {source_path} ({len(script_content)} chars)")
+
+        # Compile the script first
+        compile_result = subprocess.run(
+            ["/usr/bin/osacompile", "-o", str(compiled_path), str(source_path)],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if compile_result.returncode != 0:
+            log.error(f"Compile failed: {compile_result.stderr.strip()}")
+            return False, compile_result.stderr.strip()
+
+        # Run the compiled script
         result = subprocess.run(
-            ["osascript", "-e", script],
+            ["/usr/bin/osascript", str(compiled_path)],
             capture_output=True,
             text=True,
             timeout=30
@@ -114,7 +129,7 @@ def run_applescript(script: str, description: str) -> tuple[bool, str]:
 
 def get_reminders() -> list[tuple[str, datetime, str]]:
     """Fetch incomplete reminders. Returns list of (id, timestamp, note)."""
-    success, output = run_applescript(get_reminders_script(), "Get reminders")
+    success, output = run_applescript(get_reminders_applescript(), "Get reminders")
     if not success:
         return []
 
@@ -129,7 +144,9 @@ def get_reminders() -> list[tuple[str, datetime, str]]:
             continue
         rid, ts_str, note = parts
         try:
-            ts = datetime.fromisoformat(ts_str.strip())
+            # Handle ISO format with Z suffix
+            ts_str = ts_str.strip().replace('Z', '+00:00')
+            ts = datetime.fromisoformat(ts_str)
             entries.append((rid.strip(), ts, note.strip()))
             log.debug(f"Found reminder: {rid} - {note[:50]}")
         except ValueError as e:
@@ -146,7 +163,7 @@ def mark_reminders_complete(reminder_ids: list[str]) -> bool:
         return True
 
     log.info(f"Marking {len(reminder_ids)} reminder(s) as complete")
-    script = mark_specific_reminders_complete_script(reminder_ids)
+    script = mark_reminders_complete_applescript(reminder_ids)
     success, output = run_applescript(script, "Mark reminders complete")
 
     if success:
@@ -227,10 +244,7 @@ def append_to_daily_note(entries: list[tuple[str, datetime, str]]) -> tuple[bool
     elif next_section != -1:
         insert_pos = next_section + 1
     else:
-        # No divider or next section - append after header with blank line
         insert_pos = header_end
-        if not new_entries_text.startswith("\n"):
-            new_entries_text = new_entries_text
 
     # Insert entries
     new_content = content[:insert_pos] + new_entries_text + content[insert_pos:]
@@ -256,7 +270,7 @@ def append_to_daily_note(entries: list[tuple[str, datetime, str]]) -> tuple[bool
                 if attempt < RETRY_ATTEMPTS:
                     log.info(f"Retrying write in {RETRY_DELAY_SECONDS}s...")
                     time.sleep(RETRY_DELAY_SECONDS)
-                    content = daily_note.read_text()  # Re-read in case of sync
+                    content = daily_note.read_text()
                     continue
                 else:
                     log.error("All retry attempts failed")
@@ -278,12 +292,8 @@ def append_to_daily_note(entries: list[tuple[str, datetime, str]]) -> tuple[bool
 def main() -> int:
     """Main entry point. Returns exit code."""
     log.info("=" * 50)
-    log.info("Starting reminders-to-obsidian sync")
-
-    # Wake Reminders app first to avoid timeout
-    if not wake_reminders():
-        log.error("Failed to wake Reminders app")
-        return 1
+    log.info("Starting reminders-to-obsidian sync (AppleScript)")
+    log.info(f"Running as user: {os.getenv('USER')} (uid={os.getuid()}), HOME={os.getenv('HOME')}")
 
     # Fetch reminders
     entries = get_reminders()
@@ -310,7 +320,7 @@ def main() -> int:
         return 0
 
     # Mark only the successfully written reminders as complete
-    time.sleep(1)  # Brief pause before marking complete
+    time.sleep(1)
 
     if mark_reminders_complete(written_ids):
         log.info(f"Successfully synced {len(written_ids)} reminder(s)")
