@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
+"""
+iCloud-to-Obsidian sync.
+
+Watches an iCloud folder for JSON files from Shortcuts,
+writes content to the appropriate section in Obsidian daily notes,
+then deletes processed files.
+
+JSON format: {"section": "concerns", "text": "My text...", "ts": "2026-01-23T09:15:00"}
+"""
 import subprocess
 import sys
-import tempfile
-import time
-import os
+import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
-# Configuration
-DAILY_NOTES_FOLDER = Path("/Users/dougs/Documents/obsidian/DougVault/Daily")
-REMINDERS_LIST = "Log"
-RETRY_ATTEMPTS = 3
-RETRY_DELAY_SECONDS = 2
-POST_WRITE_VERIFY_DELAY = 1
-LOG_FILE = Path("/tmp/reminders-to-obsidian.log")
+from config import (
+    DAILY_NOTES_FOLDER, ICLOUD_INPUT_FOLDER, LOG_FILE, SECTIONS,
+    FORMAT_PLAIN, FORMAT_BLOCKQUOTE, FORMAT_BULLET, FORMAT_NUMBERED, FORMAT_CHECKBOX,
+)
 
-# Logging setup - both console and file
+# Logging setup
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-# Console handler
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter(
     "%(asctime)s [%(levelname)s] %(message)s",
@@ -28,7 +32,6 @@ console_handler.setFormatter(logging.Formatter(
 ))
 log.addHandler(console_handler)
 
-# File handler
 file_handler = logging.FileHandler(LOG_FILE)
 file_handler.setFormatter(logging.Formatter(
     "%(asctime)s [%(levelname)s] %(message)s",
@@ -37,297 +40,258 @@ file_handler.setFormatter(logging.Formatter(
 log.addHandler(file_handler)
 
 
-def get_reminders_applescript():
-    """Returns AppleScript to fetch reminders."""
-    return f'''
-tell application "Reminders"
-set output to ""
-set allLists to lists
-repeat with aList in allLists
-if name of aList is "{REMINDERS_LIST}" then
-set incompleteReminders to (reminders of aList whose completed is false)
-repeat with r in incompleteReminders
-set remId to id of r
-set remName to name of r
-set remCreated to creation date of r
-set y to year of remCreated
-set m to text -2 thru -1 of ("0" & (month of remCreated as integer))
-set d to text -2 thru -1 of ("0" & day of remCreated)
-set h to text -2 thru -1 of ("0" & hours of remCreated)
-set mins to text -2 thru -1 of ("0" & minutes of remCreated)
-set s to text -2 thru -1 of ("0" & seconds of remCreated)
-set isoDate to y & "-" & m & "-" & d & "T" & h & ":" & mins & ":" & s & "Z"
-set output to output & remId & "|" & isoDate & "|" & remName & linefeed
-end repeat
-end if
-end repeat
-end tell
-return output
-'''
+def trigger_icloud_download(path: Path, retries: int = 10, delay: float = 2) -> bool:
+    """
+    Force iCloud to download files in the given path.
+    Returns True if path exists and is accessible.
+    """
+    if not path.exists():
+        log.warning(f"Path does not exist: {path}")
+        return False
 
-
-def mark_reminders_complete_applescript(reminder_ids: list[str]):
-    """Returns AppleScript to mark specific reminders complete by ID."""
-    # Build AppleScript list of IDs
-    ids_list = ", ".join(f'"{rid}"' for rid in reminder_ids)
-    return f'''
-set targetIds to {{{ids_list}}}
-set markedCount to 0
-tell application "Reminders"
-    repeat with targetId in targetIds
-        try
-            set r to reminder id targetId
-            set completed of r to true
-            set markedCount to markedCount + 1
-        end try
-    end repeat
-end tell
-return markedCount
-'''
-
-
-def run_applescript(script: str, description: str) -> tuple[bool, str]:
-    """Run AppleScript by pre-compiling it first."""
-    log.debug(f"Running AppleScript: {description}")
-    source_path = Path("/tmp/reminders_script.applescript")
-    compiled_path = Path("/tmp/reminders_script.scpt")
     try:
-        # Write source script
-        script_content = script.strip()
-        source_path.write_text(script_content, encoding='utf-8')
-        log.info(f"Script written to {source_path} ({len(script_content)} chars)")
-
-        # Compile the script first
-        compile_result = subprocess.run(
-            ["/usr/bin/osacompile", "-o", str(compiled_path), str(source_path)],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        if compile_result.returncode != 0:
-            log.error(f"Compile failed: {compile_result.stderr.strip()}")
-            return False, compile_result.stderr.strip()
-
-        # Run the compiled script
-        result = subprocess.run(
-            ["/usr/bin/osascript", str(compiled_path)],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        if result.returncode != 0:
-            log.error(f"{description} failed: {result.stderr.strip()}")
-            return False, result.stderr.strip()
-        return True, result.stdout.strip()
+        log.debug(f"Triggering iCloud download for: {path}")
+        subprocess.run(['/usr/bin/brctl', 'download', str(path)], check=True, timeout=30)
+    except subprocess.CalledProcessError as e:
+        log.warning(f"brctl download failed: {e}")
     except subprocess.TimeoutExpired:
-        log.error(f"{description} timed out after 30 seconds")
-        return False, "Timeout"
+        log.warning("brctl download timed out")
     except Exception as e:
-        log.error(f"{description} exception: {e}")
-        return False, str(e)
+        log.warning(f"Could not trigger brctl download: {e}")
 
-
-def get_reminders() -> list[tuple[str, datetime, str]]:
-    """Fetch incomplete reminders. Returns list of (id, timestamp, note)."""
-    success, output = run_applescript(get_reminders_applescript(), "Get reminders")
-    if not success:
-        return []
-
-    entries = []
-    for line in output.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("|", 2)
-        if len(parts) != 3:
-            log.warning(f"Skipping malformed line: {line}")
-            continue
-        rid, ts_str, note = parts
+    # Wait for files to become available
+    for i in range(retries):
         try:
-            # Handle ISO format with Z suffix
-            ts_str = ts_str.strip().replace('Z', '+00:00')
-            ts = datetime.fromisoformat(ts_str)
-            entries.append((rid.strip(), ts, note.strip()))
-            log.debug(f"Found reminder: {rid} - {note[:50]}")
-        except ValueError as e:
-            log.warning(f"Skipping entry with bad timestamp: {ts_str} - {e}")
-            continue
-
-    log.info(f"Found {len(entries)} incomplete reminder(s)")
-    return entries
-
-
-def mark_reminders_complete(reminder_ids: list[str]) -> bool:
-    """Mark specific reminders as complete by their IDs."""
-    if not reminder_ids:
-        return True
-
-    log.info(f"Marking {len(reminder_ids)} reminder(s) as complete")
-    script = mark_reminders_complete_applescript(reminder_ids)
-    success, output = run_applescript(script, "Mark reminders complete")
-
-    if success:
-        try:
-            marked_count = int(output)
-            if marked_count != len(reminder_ids):
-                log.warning(f"Expected to mark {len(reminder_ids)}, but marked {marked_count}")
+            # Try to list the directory to verify it's accessible
+            list(path.iterdir())
+            return True
+        except OSError as e:
+            if e.errno == 11:  # Resource deadlock (iCloud syncing)
+                log.debug(f"Waiting for iCloud sync... ({i + 1}/{retries})")
+                time.sleep(delay)
             else:
-                log.info(f"Successfully marked {marked_count} reminder(s) complete")
-        except ValueError:
-            log.warning(f"Could not parse marked count: {output}")
-
-    return success
+                raise
+    return True
 
 
-def get_daily_note_path(for_date: datetime) -> Path:
+def load_json_file(file_path: Path, retries: int = 5, delay: float = 1) -> dict | None:
+    """Load a JSON file, waiting for iCloud if needed."""
+    for i in range(retries):
+        try:
+            size = file_path.stat().st_size
+            if size == 0:
+                log.debug(f"File is 0 bytes, waiting... ({i + 1}/{retries})")
+                time.sleep(delay)
+                continue
+
+            with open(file_path, 'r') as f:
+                return json.load(f)
+
+        except OSError as e:
+            if e.errno == 11:  # Resource deadlock
+                log.debug(f"File locked by iCloud... ({i + 1}/{retries})")
+                time.sleep(delay)
+            else:
+                log.error(f"Error reading {file_path}: {e}")
+                return None
+        except json.JSONDecodeError as e:
+            log.warning(f"Invalid JSON in {file_path}: {e}")
+            return None
+
+    log.error(f"Could not read {file_path} after {retries} attempts")
+    return None
+
+
+def get_daily_note_path(for_date: datetime = None) -> Path:
     """Get the path to the daily note for a given date."""
+    if for_date is None:
+        for_date = datetime.now()
     date_str = for_date.strftime("%Y-%m-%d")
     return DAILY_NOTES_FOLDER / f"{date_str}.md"
 
 
-def append_to_daily_note(entries: list[tuple[str, datetime, str]]) -> tuple[bool, list[str]]:
+def format_entry(text: str, fmt: str, index: int = 1) -> str:
+    """Format a single entry according to the format type."""
+    if fmt == FORMAT_BLOCKQUOTE:
+        return f"> {text}"
+    elif fmt == FORMAT_BULLET:
+        return f"- {text}"
+    elif fmt == FORMAT_NUMBERED:
+        return f"{index}. {text}"
+    elif fmt == FORMAT_CHECKBOX:
+        return f"- [ ] {text}"
+    else:  # FORMAT_PLAIN
+        return text
+
+
+def insert_at_marker(content: str, marker: str, entry_text: str) -> str | None:
     """
-    Append entries to the daily note.
-    Returns (success, list of reminder IDs that were written).
+    Insert entry after a marker in the content.
+    Returns new content or None if marker not found.
     """
-    if not entries:
-        log.info("No entries to add")
-        return True, []
+    if marker not in content:
+        return None
 
-    today = datetime.now()
-    daily_note = get_daily_note_path(today)
+    marker_pos = content.find(marker)
+    line_end = content.find("\n", marker_pos)
+    if line_end == -1:
+        line_end = len(content)
+    else:
+        line_end += 1  # Include the newline
 
-    log.info(f"Target daily note: {daily_note}")
+    # For section headers (##), find next section or divider
+    if marker.startswith("##"):
+        rest = content[line_end:]
+        divider_pos = rest.find("\n---")
+        next_section = rest.find("\n## ")
 
-    if not DAILY_NOTES_FOLDER.exists():
-        log.error(f"Daily notes folder does not exist: {DAILY_NOTES_FOLDER}")
-        return False, []
+        if divider_pos != -1 and (next_section == -1 or divider_pos < next_section):
+            insert_pos = line_end + divider_pos + 1
+        elif next_section != -1:
+            insert_pos = line_end + next_section + 1
+        else:
+            insert_pos = line_end
+    else:
+        # For field markers, replace empty placeholder line if present
+        rest = content[line_end:]
+        first_line_end = rest.find("\n")
+        if first_line_end == -1:
+            first_line_end = len(rest)
+        first_line = rest[:first_line_end].strip()
 
-    if not daily_note.exists():
-        log.error(f"Daily note does not exist: {daily_note}")
-        return False, []
+        # Check if first line is an empty placeholder (>, -, 1., etc.)
+        if first_line in (">", "-", "1.", "2.", "3.", ""):
+            # Replace the placeholder line
+            return content[:line_end] + entry_text + rest[first_line_end:]
+        else:
+            # Insert after marker
+            insert_pos = line_end
+            return content[:insert_pos] + entry_text + "\n" + content[insert_pos:]
+
+    return content[:insert_pos] + entry_text + "\n" + content[insert_pos:]
+
+
+def process_entry(entry: dict, daily_note: Path) -> bool:
+    """
+    Process a single entry and write to daily note.
+    Returns True on success.
+    """
+    section = entry.get("section", "").lower()
+    text = entry.get("text", "")
+
+    # Normalize text to list (handle string, list, or string that looks like a list)
+    if isinstance(text, str):
+        text = text.strip()
+        # Handle string that looks like JSON array: "[item1, item2]" or "[item]"
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    texts = [t.strip() for t in parsed if isinstance(t, str) and t.strip()]
+                else:
+                    texts = [text]
+            except json.JSONDecodeError:
+                # Not valid JSON, just strip the brackets
+                texts = [text[1:-1].strip()] if len(text) > 2 else []
+        else:
+            texts = [text] if text else []
+    elif isinstance(text, list):
+        texts = [t.strip() for t in text if isinstance(t, str) and t.strip()]
+    else:
+        texts = []
+
+    if not section or not texts:
+        log.warning(f"Invalid entry - missing section or text: {entry}")
+        return False
+
+    if section not in SECTIONS:
+        log.error(f"Unknown section: {section}")
+        return False
+
+    config = SECTIONS[section]
+    marker = config["marker"]
+    fmt = config["format"]
 
     # Read current content
     try:
         content = daily_note.read_text()
     except Exception as e:
         log.error(f"Failed to read daily note: {e}")
-        return False, []
+        return False
 
-    # Build new entries text
-    sorted_entries = sorted(entries, key=lambda x: x[1])  # Sort by timestamp
-    new_entries_text = ""
-    written_ids = []
-    for rid, ts, note in sorted_entries:
-        new_entries_text += f"{note}\n"
-        written_ids.append(rid)
+    # Format and insert all items
+    formatted_lines = [format_entry(t, fmt, index=i+1) for i, t in enumerate(texts)]
+    formatted = "\n".join(formatted_lines)
+    new_content = insert_at_marker(content, marker, formatted)
 
-    # Find insertion point
-    section_header = "## 📝 Daily Log"
-    if section_header not in content:
-        log.error(f"Section '{section_header}' not found in daily note")
-        return False, []
+    if new_content is None:
+        log.error(f"Marker '{marker}' not found in daily note")
+        return False
 
-    header_pos = content.find(section_header)
-    header_end = content.find("\n", header_pos)
-    if header_end == -1:
-        header_end = len(content)
-    else:
-        header_end += 1
-
-    # Find the divider or next section
-    divider_pos = content.find("\n---", header_end)
-    next_section = content.find("\n## ", header_end)
-
-    if divider_pos != -1 and (next_section == -1 or divider_pos < next_section):
-        insert_pos = divider_pos + 1
-    elif next_section != -1:
-        insert_pos = next_section + 1
-    else:
-        insert_pos = header_end
-
-    # Insert entries
-    new_content = content[:insert_pos] + new_entries_text + content[insert_pos:]
-
-    # Write with retry
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        try:
-            daily_note.write_text(new_content)
-            log.info(f"Wrote {len(written_ids)} entries to daily note (attempt {attempt})")
-
-            # Verify write
-            time.sleep(POST_WRITE_VERIFY_DELAY)
-            verify_content = daily_note.read_text()
-
-            # Check if our entries are present
-            missing = []
-            for rid, ts, note in sorted_entries:
-                if note not in verify_content:
-                    missing.append(note[:50])
-
-            if missing:
-                log.warning(f"Verification failed - missing entries: {missing}")
-                if attempt < RETRY_ATTEMPTS:
-                    log.info(f"Retrying write in {RETRY_DELAY_SECONDS}s...")
-                    time.sleep(RETRY_DELAY_SECONDS)
-                    content = daily_note.read_text()
-                    continue
-                else:
-                    log.error("All retry attempts failed")
-                    return False, []
-
-            log.info("Write verified successfully")
-            return True, written_ids
-
-        except Exception as e:
-            log.error(f"Write attempt {attempt} failed: {e}")
-            if attempt < RETRY_ATTEMPTS:
-                time.sleep(RETRY_DELAY_SECONDS)
-            else:
-                return False, []
-
-    return False, []
+    # Write
+    try:
+        daily_note.write_text(new_content)
+        log.info(f"Wrote to {section}: {text[:50]}...")
+        return True
+    except Exception as e:
+        log.error(f"Failed to write daily note: {e}")
+        return False
 
 
 def main() -> int:
-    """Main entry point. Returns exit code."""
+    """Main entry point."""
     log.info("=" * 50)
-    log.info("Starting reminders-to-obsidian sync (AppleScript)")
-    log.info(f"Running as user: {os.getenv('USER')} (uid={os.getuid()}), HOME={os.getenv('HOME')}")
+    log.info("iCloud-to-Obsidian sync")
 
-    # Fetch reminders
-    entries = get_reminders()
-    if not entries:
-        log.info("No reminders to process")
-        return 0
-
-    log.info(f"Processing {len(entries)} reminder(s)")
-    for rid, ts, note in entries:
-        log.info(f"  - [{ts.strftime('%H:%M')}] {note[:60]}")
-
-    # Small delay to let any pending Reminders sync complete
-    time.sleep(1)
-
-    # Write to daily note
-    success, written_ids = append_to_daily_note(entries)
-
-    if not success:
-        log.error("Failed to append to daily note - reminders NOT marked complete")
+    # Check daily note exists
+    daily_note = get_daily_note_path()
+    if not daily_note.exists():
+        log.error(f"Daily note does not exist: {daily_note}")
         return 1
 
-    if not written_ids:
-        log.info("No entries were written")
+    # Trigger iCloud download
+    if not ICLOUD_INPUT_FOLDER.exists():
+        log.info(f"Input folder does not exist: {ICLOUD_INPUT_FOLDER}")
         return 0
 
-    # Mark only the successfully written reminders as complete
-    time.sleep(1)
+    trigger_icloud_download(ICLOUD_INPUT_FOLDER)
 
-    if mark_reminders_complete(written_ids):
-        log.info(f"Successfully synced {len(written_ids)} reminder(s)")
+    # Find input files (JSON or TXT from Shortcuts)
+    json_files = list(ICLOUD_INPUT_FOLDER.glob("*.json")) + list(ICLOUD_INPUT_FOLDER.glob("*.txt"))
+    if not json_files:
+        log.info("No files to process")
         return 0
-    else:
-        log.error("Failed to mark reminders complete - entries may duplicate on next run")
-        return 1
+
+    log.info(f"Found {len(json_files)} file(s) to process")
+
+    success_count = 0
+    fail_count = 0
+
+    for json_file in json_files:
+        log.info(f"Processing: {json_file.name}")
+
+        # Load JSON
+        entry = load_json_file(json_file)
+        if entry is None:
+            log.error(f"Failed to load {json_file.name}")
+            fail_count += 1
+            continue
+
+        # Process entry
+        if process_entry(entry, daily_note):
+            # Delete file on success
+            try:
+                json_file.unlink()
+                log.info(f"Deleted: {json_file.name}")
+                success_count += 1
+            except Exception as e:
+                log.error(f"Failed to delete {json_file.name}: {e}")
+                fail_count += 1
+        else:
+            fail_count += 1
+
+    log.info(f"Complete: {success_count} succeeded, {fail_count} failed")
+    return 0 if fail_count == 0 else 1
 
 
 if __name__ == "__main__":
