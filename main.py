@@ -8,6 +8,7 @@ then deletes processed files.
 
 JSON format: {"section": "concerns", "text": "My text...", "ts": "2026-01-23T09:15:00"}
 """
+import socket
 import subprocess
 import sys
 import json
@@ -16,8 +17,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Prevent slow reverse DNS lookups in logging module
+socket.getfqdn = socket.gethostname
+
 from config import (
-    DAILY_NOTES_FOLDER, ICLOUD_INPUT_FOLDER, LOG_FILE, SECTIONS,
+    DAILY_NOTES_FOLDER, ICLOUD_INPUT_FOLDERS, LOG_FILE, SECTIONS,
     FORMAT_PLAIN, FORMAT_BLOCKQUOTE, FORMAT_BULLET, FORMAT_NUMBERED, FORMAT_CHECKBOX,
 )
 
@@ -52,12 +56,12 @@ def trigger_icloud_download(path: Path, retries: int = 10, delay: float = 2) -> 
     try:
         log.debug(f"Triggering iCloud download for: {path}")
         subprocess.run(['/usr/bin/brctl', 'download', str(path)], check=True, timeout=30)
-    except subprocess.CalledProcessError as e:
-        log.warning(f"brctl download failed: {e}")
+    except subprocess.CalledProcessError:
+        log.debug(f"brctl download failed for {path} (may need Full Disk Access)")
     except subprocess.TimeoutExpired:
-        log.warning("brctl download timed out")
+        log.debug("brctl download timed out")
     except Exception as e:
-        log.warning(f"Could not trigger brctl download: {e}")
+        log.debug(f"Could not trigger brctl download: {e}")
 
     # Wait for files to become available
     for i in range(retries):
@@ -74,29 +78,40 @@ def trigger_icloud_download(path: Path, retries: int = 10, delay: float = 2) -> 
     return True
 
 
-def load_json_file(file_path: Path, retries: int = 5, delay: float = 1) -> dict | None:
+def load_json_file(file_path: Path, retries: int = 5, delay: float = 5) -> dict | None:
     """Load a JSON file, waiting for iCloud if needed."""
     for i in range(retries):
         try:
-            size = file_path.stat().st_size
-            if size == 0:
-                log.debug(f"File is 0 bytes, waiting... ({i + 1}/{retries})")
+            # Use cat to force iCloud download - shell commands trigger downloads
+            # more reliably than Python's open()
+            result = subprocess.run(
+                ['/bin/cat', str(file_path)],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                log.debug(f"cat failed (iCloud syncing?), waiting... ({i + 1}/{retries})")
                 time.sleep(delay)
                 continue
 
-            with open(file_path, 'r') as f:
-                return json.load(f)
-
-        except OSError as e:
-            if e.errno == 11:  # Resource deadlock
-                log.debug(f"File locked by iCloud... ({i + 1}/{retries})")
+            content = result.stdout
+            if not content.strip():
+                log.debug(f"File is empty, waiting... ({i + 1}/{retries})")
                 time.sleep(delay)
-            else:
-                log.error(f"Error reading {file_path}: {e}")
-                return None
+                continue
+
+            return json.loads(content)
+
+        except subprocess.TimeoutExpired:
+            log.debug(f"cat timed out (iCloud syncing?), waiting... ({i + 1}/{retries})")
+            time.sleep(delay)
         except json.JSONDecodeError as e:
             log.warning(f"Invalid JSON in {file_path}: {e}")
             return None
+        except Exception as e:
+            log.debug(f"Error reading {file_path}: {e}, waiting... ({i + 1}/{retries})")
+            time.sleep(delay)
 
     log.error(f"Could not read {file_path} after {retries} attempts")
     return None
@@ -249,15 +264,16 @@ def main() -> int:
         log.error(f"Daily note does not exist: {daily_note}")
         return 1
 
-    # Trigger iCloud download
-    if not ICLOUD_INPUT_FOLDER.exists():
-        log.info(f"Input folder does not exist: {ICLOUD_INPUT_FOLDER}")
-        return 0
+    # Collect files from all input folders
+    json_files = []
+    for folder in ICLOUD_INPUT_FOLDERS:
+        if not folder.exists():
+            log.debug(f"Input folder does not exist: {folder}")
+            continue
+        trigger_icloud_download(folder)
+        json_files.extend(folder.glob("*.json"))
+        json_files.extend(folder.glob("*.txt"))
 
-    trigger_icloud_download(ICLOUD_INPUT_FOLDER)
-
-    # Find input files (JSON or TXT from Shortcuts)
-    json_files = list(ICLOUD_INPUT_FOLDER.glob("*.json")) + list(ICLOUD_INPUT_FOLDER.glob("*.txt"))
     if not json_files:
         log.info("No files to process")
         return 0

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.dougs.logfromwatch</string>
+    <string>com.dougs.logserver</string>
 
     <key>UserName</key>
     <string>dougs</string>
@@ -15,23 +15,20 @@
         <string>--project</string>
         <string>/Users/dougs/PycharmProjects/LogFromWatch</string>
         <string>python</string>
-        <string>/Users/dougs/PycharmProjects/LogFromWatch/main.py</string>
+        <string>/Users/dougs/PycharmProjects/LogFromWatch/server.py</string>
     </array>
-
-    <key>StartInterval</key>
-    <integer>180</integer>
 
     <key>RunAtLoad</key>
     <true/>
 
     <key>KeepAlive</key>
-    <false/>
+    <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/logfromwatch.stdout.log</string>
+    <string>/tmp/logserver.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/logfromwatch.stderr.log</string>
+    <string>/tmp/logserver.stderr.log</string>
 
     <key>WorkingDirectory</key>
     <string>/Users/dougs/PycharmProjects/LogFromWatch</string>
