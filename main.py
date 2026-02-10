@@ -20,9 +20,12 @@ from pathlib import Path
 # Prevent slow reverse DNS lookups in logging module
 socket.getfqdn = socket.gethostname
 
+import things
+
 from config import (
-    DAILY_NOTES_FOLDER, ICLOUD_INPUT_FOLDERS, LOG_FILE, SECTIONS,
+    DAILY_NOTES_FOLDER, ICLOUD_INPUT_FOLDERS, LOG_FILE, SECTIONS, TEMPLATE_PATH,
     FORMAT_PLAIN, FORMAT_BLOCKQUOTE, FORMAT_BULLET, FORMAT_NUMBERED, FORMAT_CHECKBOX,
+    FORMAT_BULLET_CHECKBOX,
 )
 
 # Logging setup
@@ -123,6 +126,28 @@ def get_daily_note_path(for_date: datetime = None) -> Path:
         for_date = datetime.now()
     date_str = for_date.strftime("%Y-%m-%d")
     return DAILY_NOTES_FOLDER / f"{date_str}.md"
+
+
+def ensure_daily_note_exists(file_path: Path) -> bool:
+    """Create daily note from template if it doesn't exist. Returns True if created."""
+    if file_path.exists():
+        return False
+
+    if not TEMPLATE_PATH.exists():
+        log.error(f"Template not found: {TEMPLATE_PATH}")
+        return False
+
+    template = TEMPLATE_PATH.read_text()
+    today = datetime.now()
+
+    # Replace template placeholders
+    template = template.replace("{{date}}", today.strftime("%Y-%m-%d"))
+    template = template.replace("{{title}}", today.strftime("%Y-%m-%d"))
+    template = template.replace("{{date:YYYY-MM-DD}}", today.strftime("%Y-%m-%d"))
+
+    file_path.write_text(template)
+    log.info(f"Created daily note: {file_path.name}")
+    return True
 
 
 def format_entry(text: str, fmt: str, index: int = 1) -> str:
@@ -253,16 +278,184 @@ def process_entry(entry: dict, daily_note: Path) -> bool:
         return False
 
 
+def get_things3_today_tasks() -> list[dict]:
+    """Fetch Today tasks from Things 3, sorted by today_index."""
+    try:
+        tasks = things.today()
+        return sorted(tasks, key=lambda t: t.get('today_index', 0))
+    except Exception as e:
+        log.error(f"Failed to fetch Things3 tasks: {e}")
+        return []
+
+
+def format_things3_task(task: dict) -> str:
+    """Format a Things3 task. Project name appended in parentheses if present."""
+    title = task.get('title', 'Untitled')
+    project = task.get('project_title')
+    if project:
+        return f"{title} ({project})"
+    return title
+
+
+def sync_things3_tasks(daily_note: Path) -> tuple[int, int]:
+    """
+    Sync Things3 Today tasks to the morningset section.
+    Returns (success_count, fail_count).
+    """
+    config = SECTIONS.get("morningset")
+    if not config:
+        log.error("morningset section not configured")
+        return 0, 1
+
+    marker = config["marker"]
+    position = config.get("position", "end")
+
+    tasks = get_things3_today_tasks()
+    if not tasks:
+        log.info("Things3: No Today tasks to sync")
+        return 0, 0
+
+    log.info(f"Things3: Found {len(tasks)} Today tasks")
+
+    # Read current content
+    try:
+        content = daily_note.read_text()
+    except Exception as e:
+        log.error(f"Failed to read daily note for Things3 sync: {e}")
+        return 0, 1
+
+    # Check if marker exists
+    if marker not in content:
+        log.error(f"Marker '{marker}' not found in daily note")
+        return 0, 1
+
+    # Check if tasks already synced today (look for checkboxes after marker)
+    marker_pos = content.find(marker)
+    section_start = content.find("\n", marker_pos) + 1
+    rest_of_section = content[section_start:]
+    # Find where section ends (next ## or ---)
+    next_section = rest_of_section.find("\n## ")
+    next_divider = rest_of_section.find("\n---")
+    if next_section == -1:
+        next_section = len(rest_of_section)
+    if next_divider == -1:
+        next_divider = len(rest_of_section)
+    section_end = min(next_section, next_divider)
+    section_content = rest_of_section[:section_end]
+
+    if "- [ ]" in section_content or "- [x]" in section_content:
+        log.info("Things3: Tasks already synced today, skipping")
+        return 0, 0
+
+    # Format tasks as bullet checkboxes
+    formatted_lines = [f"- [ ] {format_things3_task(t)}" for t in tasks]
+    for line in formatted_lines:
+        log.info(f"  {line}")
+
+    formatted = "\n".join(formatted_lines)
+
+    # Insert at marker (use server.py style insertion for position support)
+    marker_pos = content.find(marker)
+    line_end = content.find("\n", marker_pos)
+    if line_end == -1:
+        line_end = len(content)
+    else:
+        line_end += 1
+
+    if position == "start":
+        # Insert right after the marker line
+        insert_pos = line_end
+    else:
+        # Insert at end of section (before next --- or ##)
+        rest = content[line_end:]
+        divider_pos = rest.find("\n---")
+        next_section = rest.find("\n## ")
+
+        if divider_pos != -1 and (next_section == -1 or divider_pos < next_section):
+            insert_pos = line_end + divider_pos + 1
+        elif next_section != -1:
+            insert_pos = line_end + next_section + 1
+        else:
+            insert_pos = line_end
+
+    new_content = content[:insert_pos] + formatted + "\n" + content[insert_pos:]
+
+    # Write
+    try:
+        daily_note.write_text(new_content)
+        log.info(f"Things3: Wrote {len(tasks)} tasks to morningset")
+        return len(tasks), 0
+    except Exception as e:
+        log.error(f"Failed to write Things3 tasks: {e}")
+        return 0, 1
+
+
+def check_health_sync(daily_note: Path) -> None:
+    """
+    Check if health data was synced by 6:05 AM.
+    If not, write a warning to the biolog section.
+    Only runs once between 6:05 and 6:15 AM.
+    """
+    now = datetime.now()
+
+    # Only check between 6:05 and 6:15 AM
+    if now.hour != 6 or not (5 <= now.minute <= 15):
+        return
+
+    config = SECTIONS.get("biolog")
+    if not config:
+        return
+
+    marker = config["marker"]
+
+    try:
+        content = daily_note.read_text()
+    except Exception:
+        return
+
+    if marker not in content:
+        return
+
+    # Check biolog section content
+    marker_pos = content.find(marker)
+    section_start = content.find("\n", marker_pos) + 1
+    rest_of_section = content[section_start:]
+    next_section = rest_of_section.find("\n## ")
+    next_divider = rest_of_section.find("\n---")
+    if next_section == -1:
+        next_section = len(rest_of_section)
+    if next_divider == -1:
+        next_divider = len(rest_of_section)
+    section_end = min(next_section, next_divider)
+    section_content = rest_of_section[:section_end]
+
+    # Already has health data - all good
+    if "| Metric |" in section_content:
+        return
+
+    # Already warned - don't repeat
+    if "Health sync failed" in section_content:
+        return
+
+    # No health data by 6:05 AM - write warning
+    log.warning("Health sync: No data received by 6:05 AM - check iOS Shortcut")
+    warning_msg = "> ⚠️ Health sync failed - check iOS Shortcut automation"
+    new_content = insert_at_marker(content, marker, warning_msg)
+    if new_content:
+        daily_note.write_text(new_content)
+
+
 def main() -> int:
     """Main entry point."""
     log.info("=" * 50)
     log.info("iCloud-to-Obsidian sync")
 
-    # Check daily note exists
+    # Ensure daily note exists (create from template if needed)
     daily_note = get_daily_note_path()
     if not daily_note.exists():
-        log.error(f"Daily note does not exist: {daily_note}")
-        return 1
+        if not ensure_daily_note_exists(daily_note):
+            log.error(f"Daily note does not exist and could not be created: {daily_note}")
+            return 1
 
     # Collect files from all input folders
     json_files = []
@@ -275,8 +468,7 @@ def main() -> int:
         json_files.extend(folder.glob("*.txt"))
 
     if not json_files:
-        log.info("No files to process")
-        return 0
+        log.info("No iCloud files to process")
 
     log.info(f"Found {len(json_files)} file(s) to process")
 
@@ -305,6 +497,17 @@ def main() -> int:
                 fail_count += 1
         else:
             fail_count += 1
+
+    log.info(f"iCloud files: {success_count} succeeded, {fail_count} failed")
+
+    # Sync Things3 tasks
+    things_success, things_fail = sync_things3_tasks(daily_note)
+    success_count += things_success
+    fail_count += things_fail
+
+    # Health data comes via API (POST /obsidian/health)
+    # Check if it arrived by 6:05 AM, warn if not
+    check_health_sync(daily_note)
 
     log.info(f"Complete: {success_count} succeeded, {fail_count} failed")
     return 0 if fail_count == 0 else 1
