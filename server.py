@@ -585,7 +585,11 @@ def process_health_payload(data: dict[str, Any]) -> tuple[bool, str]:
 | **Deep Sleep** | `{sleep['deep']:.2f}h` | {deep_status} | |
 | **HRV** | `{hrv:.0f} ms` | {hrv_status} | |
 | **RHR** | `{rhr:.0f} bpm` | | |
-| **Mindful** | `{mindful:.0f} min` | {mindful_status} | |"""
+| **Mindful** | `{mindful:.0f} min` | {mindful_status} | |
+
+
+
+"""
 
     log.info(f"Health: steps={steps}, sleep={sleep['total']:.2f}h, hrv={hrv:.0f}, rhr={rhr:.0f}")
 
