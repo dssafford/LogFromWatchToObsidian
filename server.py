@@ -27,7 +27,7 @@ from config import FORMAT_PLAIN, FORMAT_BLOCKQUOTE, FORMAT_BULLET, FORMAT_NUMBER
 
 # Server config
 HOST = "0.0.0.0"  # Listen on all interfaces (needed for Tailscale)
-PORT = 8080
+PORT = 9847
 
 # Logging setup
 log = logging.getLogger(__name__)

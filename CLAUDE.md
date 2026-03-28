@@ -32,3 +32,25 @@ Hardcoded paths in `main.py`:
 - Python 3.11.9+
 - Access to Apple Reminders app
 - Obsidian vault with daily notes folder
+
+## WindowServer Memory Monitoring
+
+Monitor script: `~/bin/monitor-windowserver.sh`
+Logs: `~/Library/Logs/windowserver-memory.log` and `~/Library/Logs/windowserver-growth.log`
+
+### Baseline (2026-02-01 reboot)
+- **Reboot baseline**: 81-83 MB
+- **After GUI activity starts**: ~257 MB (176 MB jump)
+- **Growth rate during active use**: ~34 MB/hour
+
+### How to check
+```bash
+# Current memory
+ps aux | grep WindowServer | grep -v grep | awk '{printf "%.0f MB\n", $6/1024}'
+
+# Recent log entries
+tail -20 ~/Library/Logs/windowserver-memory.log
+
+# Growth alerts
+cat ~/Library/Logs/windowserver-growth.log
+```
