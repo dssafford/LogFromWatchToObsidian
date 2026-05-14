@@ -16,7 +16,7 @@ import logging
 import subprocess
 import time
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -600,6 +600,8 @@ def process_health_payload(data: dict[str, Any]) -> tuple[bool, str]:
 class LogHandler(BaseHTTPRequestHandler):
     """HTTP request handler for log entries."""
 
+    timeout = 30
+
     def _send_response(self, status: int, message: str):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -676,9 +678,14 @@ class LogHandler(BaseHTTPRequestHandler):
         return self.client_address[0]
 
 
+class LogServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def main():
     log.info(f"Starting server on {HOST}:{PORT}")
-    server = HTTPServer((HOST, PORT), LogHandler)
+    server = LogServer((HOST, PORT), LogHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
