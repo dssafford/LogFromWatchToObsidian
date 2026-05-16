@@ -33,6 +33,36 @@ Hardcoded paths in `main.py`:
 - Access to Apple Reminders app
 - Obsidian vault with daily notes folder
 
+## HTTP Server Endpoints
+
+`server.py` runs on port `9847` via `com.dougs.logserver` launchd agent. Reachable at:
+- Local: `http://192.168.4.145:9847`
+- Tailscale: `http://100.104.66.106:9847`
+
+Restart after changes: `launchctl kickstart -k gui/$UID/com.dougs.logserver`
+
+### Tally endpoints (GET or POST, no body)
+Increment a counter on a `**Label:**` `` `N` `` line in today's daily note.
+
+| Endpoint | Daily note line |
+| :--- | :--- |
+| `/wait5` | `**Wait-5 Tally:**` |
+| `/breathwork/box` | `- Box Breathing (4-4-4-4):` |
+| `/breathwork/478` | `- 4-7-8 Breathing:` |
+| `/breathwork/sigh` | `- Physiological Sigh:` |
+| `/breathwork/wimhof` | `- Wim Hof / Power Breath:` |
+| `/breathwork/coherent` | `- Coherent Breathing (5-5):` |
+
+Response: `{"status":"ok","count":N,"message":"ok"}` (breathwork also includes `"kind"`).
+
+### Other endpoints
+- `GET /health` — liveness check
+- `POST /obsidian/daily` — append entry; body `{"section":"...","text":"..."}`
+- `POST /obsidian/health` — ingest Auto Health Export JSON, writes to biolog
+- `POST /sync/things3` — pull Today tasks into morningset
+- `POST /sync/icloud` — process pending iCloud JSON files
+- `POST /sync/morning` — runs Things3 + iCloud together
+
 ## WindowServer Memory Monitoring
 
 Monitor script: `~/bin/monitor-windowserver.sh`
