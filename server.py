@@ -539,6 +539,47 @@ def increment_wait5_tally() -> tuple[bool, int, str]:
         return False, 0, f"Failed to write daily note: {e}"
 
 
+# Breathwork tally: slug → label as it appears in the daily note bullet
+BREATHWORK_LABELS: dict[str, str] = {
+    "box": "Box Breathing (4-4-4-4)",
+    "478": "4-7-8 Breathing",
+    "sigh": "Physiological Sigh",
+    "wimhof": "Wim Hof / Power Breath",
+    "coherent": "Coherent Breathing (5-5)",
+}
+
+
+def increment_breathwork_tally(kind: str) -> tuple[bool, int, str]:
+    """Increment a breathwork tally line in today's daily note. Returns (success, new_count, message)."""
+    label = BREATHWORK_LABELS.get(kind)
+    if not label:
+        return False, 0, f"Unknown breathwork kind: {kind}. Valid: {', '.join(BREATHWORK_LABELS)}"
+
+    daily_note = get_daily_note_path()
+    if not daily_note.exists():
+        ensure_daily_note_exists(daily_note)
+
+    try:
+        content = daily_note.read_text()
+    except Exception as e:
+        return False, 0, f"Failed to read daily note: {e}"
+
+    pattern = re.compile(r"(- " + re.escape(label) + r":\s*`)(\d+)(`)")
+    match = pattern.search(content)
+    if not match:
+        return False, 0, f"Breathwork tally marker '{label}' not found in daily note"
+
+    new_count = int(match.group(2)) + 1
+    new_content = content[:match.start()] + f"{match.group(1)}{new_count}{match.group(3)}" + content[match.end():]
+
+    try:
+        daily_note.write_text(new_content)
+        log.info(f"Breathwork '{label}' incremented to {new_count}")
+        return True, new_count, "ok"
+    except Exception as e:
+        return False, 0, f"Failed to write daily note: {e}"
+
+
 def sync_morning() -> dict:
     """Run all morning sync tasks. Returns summary dict."""
     results = {}
@@ -652,8 +693,12 @@ class LogHandler(BaseHTTPRequestHandler):
         elif self.path == "/wait5":
             success, count, message = increment_wait5_tally()
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "count": count, "message": message})
+        elif self.path.startswith("/breathwork/"):
+            kind = self.path[len("/breathwork/"):]
+            success, count, message = increment_breathwork_tally(kind)
+            self._send_json(200 if success else 500, {"status": "ok" if success else "error", "kind": kind, "count": count, "message": message})
         else:
-            self._send_response(404, "Endpoints: GET /wait5, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<box|478|sigh|wimhof|coherent>, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
 
     def do_POST(self):
         """Handle all POST endpoints."""
@@ -681,9 +726,15 @@ class LogHandler(BaseHTTPRequestHandler):
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "count": count, "message": message})
             return
 
+        if self.path.startswith("/breathwork/"):
+            kind = self.path[len("/breathwork/"):]
+            success, count, message = increment_breathwork_tally(kind)
+            self._send_json(200 if success else 500, {"status": "ok" if success else "error", "kind": kind, "count": count, "message": message})
+            return
+
         # Endpoints requiring JSON body
         if self.path not in ("/obsidian/daily", "/obsidian/health"):
-            self._send_response(404, "Endpoints: GET /wait5, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning, /wait5")
+            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<kind>, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning, /wait5, /breathwork/<kind>")
             return
 
         try:
