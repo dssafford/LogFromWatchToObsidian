@@ -13,6 +13,7 @@ Run with: uv run python server.py
 """
 import json
 import logging
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -509,6 +510,35 @@ def sync_things3_tasks() -> tuple[int, int]:
         return 0, 1
 
 
+WAIT5_PATTERN = re.compile(r"(\*\*Wait-5 Tally:\*\*\s*`)(\d+)(`)")
+
+
+def increment_wait5_tally() -> tuple[bool, int, str]:
+    """Increment the Wait-5 Tally in today's daily note. Returns (success, new_count, message)."""
+    daily_note = get_daily_note_path()
+    if not daily_note.exists():
+        ensure_daily_note_exists(daily_note)
+
+    try:
+        content = daily_note.read_text()
+    except Exception as e:
+        return False, 0, f"Failed to read daily note: {e}"
+
+    match = WAIT5_PATTERN.search(content)
+    if not match:
+        return False, 0, "Wait-5 Tally marker not found in daily note"
+
+    new_count = int(match.group(2)) + 1
+    new_content = content[:match.start()] + f"{match.group(1)}{new_count}{match.group(3)}" + content[match.end():]
+
+    try:
+        daily_note.write_text(new_content)
+        log.info(f"Wait-5 Tally incremented to {new_count}")
+        return True, new_count, "ok"
+    except Exception as e:
+        return False, 0, f"Failed to write daily note: {e}"
+
+
 def sync_morning() -> dict:
     """Run all morning sync tasks. Returns summary dict."""
     results = {}
@@ -619,8 +649,11 @@ class LogHandler(BaseHTTPRequestHandler):
         """Health check endpoint."""
         if self.path == "/health":
             self._send_response(200, "Server is running")
+        elif self.path == "/wait5":
+            success, count, message = increment_wait5_tally()
+            self._send_json(200 if success else 500, {"status": "ok" if success else "error", "count": count, "message": message})
         else:
-            self._send_response(404, "Endpoints: POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /wait5, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
 
     def do_POST(self):
         """Handle all POST endpoints."""
@@ -643,9 +676,14 @@ class LogHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok", **results})
             return
 
+        if self.path == "/wait5":
+            success, count, message = increment_wait5_tally()
+            self._send_json(200 if success else 500, {"status": "ok" if success else "error", "count": count, "message": message})
+            return
+
         # Endpoints requiring JSON body
         if self.path not in ("/obsidian/daily", "/obsidian/health"):
-            self._send_response(404, "Endpoints: POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /wait5, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning, /wait5")
             return
 
         try:
