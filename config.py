@@ -3,7 +3,7 @@ from pathlib import Path
 
 # Paths
 DAILY_NOTES_FOLDER = Path("/Users/dougs/Documents/obsidian/DougVault/Daily")
-TEMPLATE_PATH = Path.home() / "Documents/obsidian/DougVault/extras/templates/Daily Note Template.md"
+TEMPLATE_PATH = Path.home() / "Documents/obsidian/DougVault/templates/Daily Note Template.md"
 ICLOUD_INPUT_FOLDERS = [
     Path.home() / "Library/Mobile Documents/iCloud~is~workflow~my~workflows/Documents/log_to_obsidian",
     Path.home() / "Library/Mobile Documents/iCloud~dougs~SimpleWatch/Documents/log_to_obsidian",
