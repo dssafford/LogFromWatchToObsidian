@@ -1,0 +1,6 @@
+# Runtime state (health once-per-day guard)
+.health_last_run.json
+
+# Editor/patch backups
+*.bak
+*.bak-*

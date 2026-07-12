@@ -602,15 +602,62 @@ def sync_morning() -> dict:
 
 # --- Health data processing ---
 
+def _latest_day_points(points: list) -> list:
+    """Keep only the points from the most recent calendar day present.
+
+    Defense-in-depth: a Health Export payload is expected to cover a single
+    day (shortcut range = "Yesterday"). If a shortcut default flips to a
+    multi-day range, summing every point would inflate the Bio-Log. Here we
+    collapse to just the latest day so totals stay per-day.
+    """
+    def day_of(pt):
+        d = pt.get('date') if isinstance(pt, dict) else None
+        return d[:10] if isinstance(d, str) and len(d) >= 10 else None
+    days = [day_of(p) for p in points]
+    days = [d for d in days if d]
+    if not days:
+        return points  # no usable date info -> leave untouched (old behavior)
+    target = max(days)  # YYYY-MM-DD sorts lexicographically == chronologically
+    return [p for p in points if day_of(p) == target]
+
+
 def get_metric_data(data: dict[str, Any], metric_name: str) -> list:
     """Get data points for a specific metric from Health Export payload."""
     metrics_list = data.get('data', {}).get('metrics', [])
     payload = next((item for item in metrics_list if item["name"] == metric_name), None)
-    return payload['data'] if payload else []
+    points = payload['data'] if payload else []
+    return _latest_day_points(points)
+
+
+HEALTH_STATE_FILE = Path(__file__).resolve().parent / ".health_last_run.json"
+
+
+def _health_recorded_today() -> bool:
+    """True if a real health payload was already recorded today."""
+    try:
+        state = json.loads(HEALTH_STATE_FILE.read_text())
+        return state.get("date") == datetime.now().strftime("%Y-%m-%d")
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+
+def _mark_health_recorded() -> None:
+    """Record today as done so later reruns no-op."""
+    try:
+        HEALTH_STATE_FILE.write_text(
+            json.dumps({"date": datetime.now().strftime("%Y-%m-%d")})
+        )
+    except OSError as e:
+        log.warning(f"Could not write health state file: {e}")
 
 
 def process_health_payload(data: dict[str, Any]) -> tuple[bool, str]:
     """Process Health Export JSON and write to biolog section."""
+    # Idempotency: once a real health payload has been recorded today, skip
+    # reruns (multiple automations + manual fallback all POST; first win).
+    if _health_recorded_today():
+        log.info("Health already recorded today; skipping rerun.")
+        return True, "Health already recorded today; skipping rerun."
     # Extract metrics
     step_data = get_metric_data(data, 'step_count')
     steps = int(sum(item.get('qty', 0) for item in step_data))
@@ -665,7 +712,15 @@ def process_health_payload(data: dict[str, Any]) -> tuple[bool, str]:
     log.info(f"Health: steps={steps}, sleep={sleep['total']:.2f}h, hrv={hrv:.0f}, rhr={rhr:.0f}")
 
     # Write to biolog section using existing process_entry
-    return process_entry({"section": "biolog", "text": md_table})
+    success, message = process_entry({"section": "biolog", "text": md_table})
+
+    # Only lock the day when the write succeeded AND the payload carried real
+    # data, so an early empty/partial export can't block a later real one.
+    has_data = steps > 0 or sleep['total'] > 0 or hrv > 0 or rhr > 0 or mindful > 0
+    if success and has_data:
+        _mark_health_recorded()
+
+    return success, message
 
 
 class LogHandler(BaseHTTPRequestHandler):
