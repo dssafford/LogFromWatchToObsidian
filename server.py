@@ -890,6 +890,55 @@ def process_health_payload(data: dict[str, Any]) -> tuple[bool, str]:
     return success, message
 
 
+# --- Oura sync (primary Bio-Log source, replaces iPhone Health Auto Export) ---
+
+def _write_oura_failure(reason: str) -> None:
+    """Replace the Bio-Log section with a visible failure marker."""
+    try:
+        process_entry({"section": "biolog", "text": f"> ⚠️ Oura sync failed — {reason}"})
+    except Exception as e:
+        log.error(f"Could not write Oura failure note: {e}")
+
+
+def sync_oura() -> tuple[bool, str]:
+    """Pull today's Bio-Log from the Oura API and write it to the daily note."""
+    try:
+        import oura_client
+    except Exception as e:
+        return False, f"oura_client import failed: {e}"
+
+    day = datetime.now().strftime("%Y-%m-%d")
+    try:
+        token = oura_client.OuraAuth().get_access_token()
+        responses = oura_client.fetch_oura_day(token, day)
+        if responses.get("_session_error"):
+            log.warning(f"Oura session/mindfulness skipped: {responses['_session_error']}")
+        metrics = oura_client.build_bio_log(responses, day)
+    except oura_client.OuraError as e:
+        log.error(f"Oura sync failed: {e}")
+        _write_oura_failure(str(e))
+        return False, f"Oura sync failed: {e}"
+    except Exception as e:
+        log.error(f"Oura sync error: {e}")
+        _write_oura_failure(str(e))
+        return False, f"Oura sync error: {e}"
+
+    if not oura_client.has_real_data(metrics):
+        log.warning("Oura returned no usable data (ring not synced yet?)")
+        _write_oura_failure("Oura returned no data yet (ring not synced?)")
+        return False, "Oura returned no data"
+
+    table = oura_client.render_bio_log_table(metrics, datetime.now().strftime("%H:%M"))
+    success, message = process_entry({"section": "biolog", "text": table})
+    if success:
+        log.info(
+            f"Oura: steps={metrics['steps']} sleep={metrics['sleep']['total']}h "
+            f"hrv={metrics['hrv']:.0f} rhr={metrics['rhr']:.0f} "
+            f"readiness={metrics['readiness']} mindful={metrics['mindful']}"
+        )
+    return success, message
+
+
 class LogHandler(BaseHTTPRequestHandler):
     """HTTP request handler for log entries."""
 
@@ -919,8 +968,11 @@ class LogHandler(BaseHTTPRequestHandler):
             kind = self.path[len("/breathwork/"):]
             success, count, message = increment_breathwork_tally(kind)
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "kind": kind, "count": count, "message": message})
+        elif self.path == "/sync/oura":
+            success, message = sync_oura()
+            self._send_json(200 if success else 500, {"status": "ok" if success else "error", "message": message})
         else:
-            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<box|478|sigh|wimhof|coherent>, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<box|478|sigh|wimhof|coherent>, /sync/oura, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
 
     def do_POST(self):
         """Handle all POST endpoints."""
@@ -941,6 +993,13 @@ class LogHandler(BaseHTTPRequestHandler):
             log.info("Sync: Morning (Things3 + iCloud)")
             results = sync_morning()
             self._send_json(200, {"status": "ok", **results})
+            return
+
+        if self.path == "/sync/oura":
+            log.info("Sync: Oura")
+            success, message = sync_oura()
+            self._send_json(200 if success else 500,
+                            {"status": "ok" if success else "error", "message": message})
             return
 
         if self.path == "/wait5":

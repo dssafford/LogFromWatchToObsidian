@@ -4,3 +4,6 @@
 # Editor/patch backups
 *.bak
 *.bak-*
+.env
+oura_secrets.json
+oura_tokens.json
