@@ -66,6 +66,7 @@ def run():
     assert "**RHR** | `52 bpm`" in content, content
     assert "**Readiness** | `82`" in content, content
     assert "Mindful" not in content, content
+    assert "*synced" in content, content
     print("ok test_sync_oura_writes_table")
     print("\n--- rendered Bio-Log section ---")
     start = content.index("## 🩺 Bio-Log")

@@ -305,24 +305,23 @@ def has_real_data(m: dict) -> bool:
 
 
 def render_bio_log_table(m: dict, timestamp: str) -> str:
-    """Markdown Bio-Log table matching the existing format, plus a Readiness row."""
+    """Clean 3-column Bio-Log table (Metric | Value | Status) with a Readiness
+    row and a 'synced HH:MM' caption line underneath."""
     def st(cond: bool) -> str:
         return "+" if cond else "-"
 
     rows = [
-        f"| **Steps** | `{m['steps']}` | {st(m['steps'] > 8000)} | |",
-        f"| **Sleep** | `{m['sleep']['total']:.2f}h` | {st(m['sleep']['total'] > 7)} | |",
-        f"| **Deep Sleep** | `{m['sleep']['deep']:.2f}h` | {st(m['sleep']['deep'] > 1.0)} | |",
-        f"| **REM Sleep** | `{m['sleep']['rem']:.2f}h` | {st(m['sleep']['rem'] > 1.5)} | |",
-        f"| **Efficiency** | `{m['sleep']['efficiency']:.0f}%` | {st(m['sleep']['efficiency'] >= 85)} | |",
-        f"| **HRV** | `{m['hrv']:.0f} ms` | {st(m['hrv'] > 40)} | |",
-        f"| **RHR** | `{m['rhr']:.0f} bpm` | | |",
+        f"| **Steps** | `{m['steps']}` | {st(m['steps'] > 8000)} |",
+        f"| **Sleep** | `{m['sleep']['total']:.2f}h` | {st(m['sleep']['total'] > 7)} |",
+        f"| **Deep Sleep** | `{m['sleep']['deep']:.2f}h` | {st(m['sleep']['deep'] > 1.0)} |",
+        f"| **REM Sleep** | `{m['sleep']['rem']:.2f}h` | {st(m['sleep']['rem'] > 1.5)} |",
+        f"| **Efficiency** | `{m['sleep']['efficiency']:.0f}%` | {st(m['sleep']['efficiency'] >= 85)} |",
+        f"| **HRV** | `{m['hrv']:.0f} ms` | {st(m['hrv'] > 40)} |",
+        f"| **RHR** | `{m['rhr']:.0f} bpm` |  |",
     ]
     if m.get("readiness") is not None:
-        rows.append(f"| **Readiness** | `{m['readiness']}` | {st(m['readiness'] >= 70)} | |")
+        rows.append(f"| **Readiness** | `{m['readiness']}` | {st(m['readiness'] >= 70)} |")
 
-    header = (
-        f"| Metric | Value | Status | ({timestamp}) |\n"
-        f"| :--- | :--- | :--- | :--- |"
-    )
-    return header + "\n" + "\n".join(rows) + "\n\n\n\n"
+    header = "| Metric | Value | Status |\n| :--- | :--- | :--- |"
+    caption = f"\n\n*synced {timestamp} · Oura*"
+    return header + "\n" + "\n".join(rows) + caption + "\n\n\n\n"

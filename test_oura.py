@@ -78,7 +78,8 @@ def test_render_rows():
     assert "**Efficiency** | `88%`" in table   # 25200/28800 -> 87.5 -> 88
     assert "**Deep Sleep** | `1.00h`" in table
     assert "Mindful" not in table              # dropped
-    assert "(08:00)" in table
+    assert "| Metric | Value | Status |\n" in table   # 3-column
+    assert "*synced 08:00" in table                   # time is now a caption
     print("ok test_render_rows")
 
 
