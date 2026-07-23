@@ -60,10 +60,12 @@ def run():
     assert ok, f"sync_oura failed: {msg}"
     assert "**Steps** | `9000`" in content, content
     assert "**Sleep** | `7.00h`" in content, content
+    assert "**REM Sleep** | `1.50h`" in content, content
+    assert "**Efficiency** | `88%`" in content, content
     assert "**HRV** | `45 ms`" in content, content
     assert "**RHR** | `52 bpm`" in content, content
     assert "**Readiness** | `82`" in content, content
-    assert "**Mindful** | `15 min`" in content, content
+    assert "Mindful" not in content, content
     print("ok test_sync_oura_writes_table")
     print("\n--- rendered Bio-Log section ---")
     start = content.index("## 🩺 Bio-Log")

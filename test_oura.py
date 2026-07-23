@@ -70,13 +70,16 @@ def test_build_bio_log_empty_is_zero():
     print("ok test_build_bio_log_empty_is_zero")
 
 
-def test_render_includes_readiness_row():
+def test_render_rows():
     m = oura_client.build_bio_log(RESPONSES, "2026-07-23")
     table = oura_client.render_bio_log_table(m, "08:00")
     assert "**Readiness** | `82`" in table
-    assert "**Mindful** | `25 min`" in table
+    assert "**REM Sleep** | `1.50h`" in table
+    assert "**Efficiency** | `88%`" in table   # 25200/28800 -> 87.5 -> 88
+    assert "**Deep Sleep** | `1.00h`" in table
+    assert "Mindful" not in table              # dropped
     assert "(08:00)" in table
-    print("ok test_render_includes_readiness_row")
+    print("ok test_render_rows")
 
 
 def test_render_omits_readiness_when_absent():
