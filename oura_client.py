@@ -304,23 +304,46 @@ def has_real_data(m: dict) -> bool:
             or m["rhr"] > 0 or (m.get("readiness") or 0) > 0 or m["mindful"] > 0)
 
 
+# Status "+" thresholds, calibrated to Doug's ~30-day Oura baselines (median/p75)
+# so "+" means "a good day for him", not an unreachable generic target. Higher is
+# better except RHR (lower is better). Tweak here as baselines drift.
+BIO_LOG_THRESHOLDS = {
+    "steps": 5000,      # median ~3840, p75 ~4940 -> a genuinely active day
+    "sleep_h": 7.0,     # health target (p25 ~7.1)
+    "deep_h": 0.4,      # runs low for him; p75 ~0.4 = a good deep-sleep night
+    "rem_h": 1.5,       # ~median 1.6
+    "eff_pct": 82,      # median 80, max 84 -> his better nights
+    "hrv_ms": 14,       # median 12, p75 14 -> a strong recovery day
+    "rhr_bpm": 54,      # LOWER better; median 55, p25 ~53 -> a good low-RHR day
+    "readiness": 80,    # above his median 79 (Oura calls >=70 "good")
+}
+
+
 def render_bio_log_table(m: dict, timestamp: str) -> str:
     """Clean 3-column Bio-Log table (Metric | Value | Status) with a Readiness
-    row and a 'synced HH:MM' caption line underneath."""
+    row and a 'synced HH:MM' caption line underneath. Status is calibrated to
+    Doug's personal Oura baselines (see BIO_LOG_THRESHOLDS)."""
+    th = BIO_LOG_THRESHOLDS
+
     def st(cond: bool) -> str:
         return "+" if cond else "-"
 
+    # Round the display value and judge status on the SAME number, so a shown
+    # "82%" can't read as "-" because the raw 81.7 missed the cutoff.
+    hrv = round(m["hrv"])
+    rhr = round(m["rhr"])
+    eff = round(m["sleep"]["efficiency"])
     rows = [
-        f"| **Steps** | `{m['steps']}` | {st(m['steps'] > 8000)} |",
-        f"| **Sleep** | `{m['sleep']['total']:.2f}h` | {st(m['sleep']['total'] > 7)} |",
-        f"| **Deep Sleep** | `{m['sleep']['deep']:.2f}h` | {st(m['sleep']['deep'] > 1.0)} |",
-        f"| **REM Sleep** | `{m['sleep']['rem']:.2f}h` | {st(m['sleep']['rem'] > 1.5)} |",
-        f"| **Efficiency** | `{m['sleep']['efficiency']:.0f}%` | {st(m['sleep']['efficiency'] >= 85)} |",
-        f"| **HRV** | `{m['hrv']:.0f} ms` | {st(m['hrv'] > 40)} |",
-        f"| **RHR** | `{m['rhr']:.0f} bpm` |  |",
+        f"| **Steps** | `{m['steps']}` | {st(m['steps'] >= th['steps'])} |",
+        f"| **Sleep** | `{m['sleep']['total']:.2f}h` | {st(m['sleep']['total'] >= th['sleep_h'])} |",
+        f"| **Deep Sleep** | `{m['sleep']['deep']:.2f}h` | {st(m['sleep']['deep'] >= th['deep_h'])} |",
+        f"| **REM Sleep** | `{m['sleep']['rem']:.2f}h` | {st(m['sleep']['rem'] >= th['rem_h'])} |",
+        f"| **Efficiency** | `{eff}%` | {st(eff >= th['eff_pct'])} |",
+        f"| **HRV** | `{hrv} ms` | {st(hrv >= th['hrv_ms'])} |",
+        f"| **RHR** | `{rhr} bpm` | {st(0 < rhr <= th['rhr_bpm'])} |",
     ]
     if m.get("readiness") is not None:
-        rows.append(f"| **Readiness** | `{m['readiness']}` | {st(m['readiness'] >= 70)} |")
+        rows.append(f"| **Readiness** | `{m['readiness']}` | {st(m['readiness'] >= th['readiness'])} |")
 
     header = "| Metric | Value | Status |\n| :--- | :--- | :--- |"
     caption = f"\n\n*synced {timestamp} · Oura*"
