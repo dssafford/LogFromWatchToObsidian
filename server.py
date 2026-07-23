@@ -11,6 +11,8 @@ Handles:
 
 Run with: uv run python server.py
 """
+import csv
+import io
 import json
 import logging
 import re
@@ -602,6 +604,165 @@ def sync_morning() -> dict:
 
 # --- Health data processing ---
 
+class HealthParseError(Exception):
+    """Raised when a health POST body can't be turned into a metrics payload."""
+
+
+# CSV header keyword (lowercased substring) -> internal metric name.
+# The iPhone "Health Auto Export" action periodically reverts from JSON to CSV
+# (and the shortcut's export action resets to "Choose"); rather than failing the
+# whole day with an opaque "Invalid JSON: char 0", we parse the CSV into the same
+# {"data": {"metrics": [...]}} shape the JSON export produces and reuse one path.
+_CSV_METRIC_KEYWORDS = [
+    ("heart rate variability", "heart_rate_variability"),
+    ("hrv", "heart_rate_variability"),
+    ("resting heart rate", "resting_heart_rate"),
+    ("step count", "step_count"),
+    ("steps", "step_count"),
+    ("mindful", "mindful_minutes"),
+]
+
+# Sleep columns look like "Sleep Analysis [Asleep] (hr)"; map bracket/stage words
+# to the sub-field names process_health_payload reads off a sleep_analysis point.
+_CSV_SLEEP_KEYWORDS = [
+    ("in bed", "inBed"),
+    ("inbed", "inBed"),
+    ("total sleep", "totalSleep"),
+    ("totalsleep", "totalSleep"),
+    ("asleep", "asleep"),
+    ("deep", "deep"),
+    ("rem", "rem"),
+    ("core", "core"),
+    ("awake", "awake"),
+]
+
+
+def _to_float(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _map_csv_header(header: str):
+    """Return ("metric", name) or ("sleep", subfield) for a CSV column, else None."""
+    hl = header.lower()
+    if "sleep" in hl:
+        for kw, key in _CSV_SLEEP_KEYWORDS:
+            if kw in hl:
+                return ("sleep", key)
+        return None
+    for kw, name in _CSV_METRIC_KEYWORDS:
+        if kw in hl:
+            return ("metric", name)
+    return None
+
+
+def csv_to_health_payload(text: str) -> dict[str, Any]:
+    """Convert a Health Auto Export CSV body into the JSON export's dict shape.
+
+    Recognized numeric columns (steps, HRV, RHR, mindful) become one point per
+    row so the existing sum/average + latest-day logic applies unchanged. Sleep
+    stage columns are summed per calendar day into a single sleep_analysis point.
+    Unrecognized columns are ignored (graceful degradation). Raises
+    HealthParseError if nothing usable is found.
+    """
+    rows = [r for r in csv.reader(io.StringIO(text)) if any((c or "").strip() for c in r)]
+    if not rows:
+        raise HealthParseError("CSV had no rows")
+
+    header = rows[0]
+    date_idx = 0
+    for i, h in enumerate(header):
+        hl = h.lower()
+        if "date" in hl or "time" in hl:
+            date_idx = i
+            break
+
+    col_map = {}
+    for i, h in enumerate(header):
+        if i == date_idx:
+            continue
+        mapped = _map_csv_header(h)
+        if mapped:
+            col_map[i] = mapped
+    if not col_map:
+        raise HealthParseError(
+            "CSV recognized no health columns; header=" + ",".join(header)[:200]
+        )
+
+    metric_points: dict[str, list] = {}
+    sleep_by_day: dict[str, dict] = {}
+    sleep_date_of_day: dict[str, str] = {}
+
+    for row in rows[1:]:
+        if len(row) <= date_idx:
+            continue
+        date = row[date_idx].strip()
+        day = date[:10]
+        for i, (kind, key) in col_map.items():
+            if i >= len(row):
+                continue
+            val = _to_float(row[i])
+            if val is None:
+                continue
+            if kind == "metric":
+                metric_points.setdefault(key, []).append({"date": date, "qty": val})
+            else:  # sleep stage
+                fields = sleep_by_day.setdefault(day, {})
+                fields[key] = fields.get(key, 0.0) + val
+                sleep_date_of_day.setdefault(day, date)
+
+    metrics = [{"name": name, "data": pts} for name, pts in metric_points.items()]
+
+    if sleep_by_day:
+        sleep_points = []
+        for day, fields in sleep_by_day.items():
+            point = {"date": sleep_date_of_day[day]}
+            point.update(fields)
+            if "totalSleep" not in point:
+                if "asleep" in point:
+                    point["totalSleep"] = point["asleep"]
+                else:
+                    point["totalSleep"] = sum(point.get(k, 0.0) for k in ("deep", "rem", "core"))
+            if "asleep" not in point:
+                point["asleep"] = point.get("totalSleep", 0.0)
+            sleep_points.append(point)
+        metrics.append({"name": "sleep_analysis", "data": sleep_points})
+
+    log.warning(
+        "Health payload was CSV, not JSON — auto-parsed %d column(s). "
+        "Fix the iPhone Health Auto Export format back to JSON.", len(col_map)
+    )
+    return {"data": {"metrics": metrics}}
+
+
+def parse_health_body(body: str, content_type: str = "") -> dict[str, Any]:
+    """Turn a raw /obsidian/health POST body into a metrics dict.
+
+    Accepts JSON (normal) or CSV (degraded fallback). Raises HealthParseError
+    with an actionable message for empty/unparseable bodies instead of leaking
+    the opaque 'Invalid JSON: Expecting value: line 1 column 1 (char 0)'.
+    """
+    stripped = body.strip()
+    if not stripped:
+        raise HealthParseError(
+            "empty body — Health Export produced no data "
+            "(check the shortcut actually ran and the date range isn't empty)"
+        )
+    looks_json = stripped[0] in "{["
+    is_csv_content_type = "csv" in content_type.lower()
+    if looks_json and not is_csv_content_type:
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as e:
+            raise HealthParseError(f"body starts like JSON but failed to parse: {e}")
+    return csv_to_health_payload(stripped)
+
+
 def _latest_day_points(points: list) -> list:
     """Keep only the points from the most recent calendar day present.
 
@@ -618,7 +779,13 @@ def _latest_day_points(points: list) -> list:
     if not days:
         return points  # no usable date info -> leave untouched (old behavior)
     target = max(days)  # YYYY-MM-DD sorts lexicographically == chronologically
-    return [p for p in points if day_of(p) == target]
+    kept = [p for p in points if day_of(p) == target]
+    if len(kept) < len(points):
+        log.info(
+            "Multi-day payload: collapsed %d point(s) to %d for latest day %s",
+            len(points), len(kept), target,
+        )
+    return kept
 
 
 def get_metric_data(data: dict[str, Any], metric_name: str) -> list:
@@ -787,25 +954,43 @@ class LogHandler(BaseHTTPRequestHandler):
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "kind": kind, "count": count, "message": message})
             return
 
-        # Endpoints requiring JSON body
+        # Endpoints requiring a body
         if self.path not in ("/obsidian/daily", "/obsidian/health"):
             self._send_response(404, "Endpoints: GET /wait5, /breathwork/<kind>, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning, /wait5, /breathwork/<kind>")
             return
 
-        try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length).decode()
-            data = json.loads(body)
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode()
 
-            if self.path == "/obsidian/health":
-                log.info("Received health data")
+        # Health endpoint tolerates CSV (shortcut format reverts) and gives an
+        # actionable error on empty bodies instead of the opaque char-0 message.
+        if self.path == "/obsidian/health":
+            try:
+                data = parse_health_body(body, self.headers.get("Content-Type", ""))
+            except HealthParseError as e:
+                log.error(f"Health payload rejected: {e}")
+                self._send_response(400, f"Health payload rejected: {e}")
+                return
+            except Exception as e:
+                log.error(f"Error parsing health body: {e}")
+                self._send_response(500, f"Server error: {e}")
+                return
+            log.info("Received health data")
+            try:
                 success, message = process_health_payload(data)
-            else:
-                log.info(f"Received: {data}")
-                success, message = process_entry(data)
-
+            except Exception as e:
+                log.error(f"Error processing health payload: {e}")
+                self._send_response(500, f"Server error: {e}")
+                return
             self._send_response(200 if success else 400, message)
+            return
 
+        # /obsidian/daily — JSON only
+        try:
+            data = json.loads(body)
+            log.info(f"Received: {data}")
+            success, message = process_entry(data)
+            self._send_response(200 if success else 400, message)
         except json.JSONDecodeError as e:
             log.error(f"Invalid JSON: {e}")
             self._send_response(400, f"Invalid JSON: {e}")
