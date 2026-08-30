@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dougs.oura-verify</string>
+
+    <key>UserName</key>
+    <string>dougs</string>
+
+    <!-- Five minutes after com.dougs.oura-sync: re-fetch the day from Oura and
+         check the table the sync actually wrote. A sync that reports "ok" is
+         not proof it wrote the right night — this is. Verdict goes to
+         ~/Library/Logs/oura-verify.log and into the note's Bio-Log. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dougs/PycharmProjects/LogFromWatch/.venv/bin/python</string>
+        <string>/Users/dougs/PycharmProjects/LogFromWatch/verify_oura.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/dougs/PycharmProjects/LogFromWatch</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>5</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/oura-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/oura-sync.log</string>
+</dict>
+</plist>
