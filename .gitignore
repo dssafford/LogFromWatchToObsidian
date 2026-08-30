@@ -7,3 +7,6 @@
 .env
 oura_secrets.json
 oura_tokens.json
+
+# Runtime state (Oura once-per-day retry guard)
+.oura_last_run.json

@@ -900,6 +900,28 @@ def _write_oura_failure(reason: str) -> None:
         log.error(f"Could not write Oura failure note: {e}")
 
 
+OURA_STATE_FILE = Path(__file__).resolve().parent / ".oura_last_run.json"
+
+
+def _oura_synced_today() -> bool:
+    """True if a Bio-Log with the note day's own night was already written."""
+    try:
+        state = json.loads(OURA_STATE_FILE.read_text())
+        return state.get("date") == datetime.now().strftime("%Y-%m-%d")
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+
+def _mark_oura_synced() -> None:
+    """Record today as done so the 10:00 retry no-ops after a good 08:00."""
+    try:
+        OURA_STATE_FILE.write_text(
+            json.dumps({"date": datetime.now().strftime("%Y-%m-%d")})
+        )
+    except OSError as e:
+        log.warning(f"Could not write Oura state file: {e}")
+
+
 def sync_oura() -> tuple[bool, str]:
     """Pull today's Bio-Log from the Oura API and write it to the daily note."""
     try:
@@ -931,12 +953,28 @@ def sync_oura() -> tuple[bool, str]:
     table = oura_client.render_bio_log_table(metrics, datetime.now().strftime("%H:%M"))
     success, message = process_entry({"section": "biolog", "text": table})
     if success:
+        _mark_oura_synced()
         log.info(
             f"Oura: steps={metrics['steps']} sleep={metrics['sleep']['total']}h "
             f"hrv={metrics['hrv']:.0f} rhr={metrics['rhr']:.0f} "
             f"readiness={metrics['readiness']} mindful={metrics['mindful']}"
         )
     return success, message
+
+
+def sync_oura_retry() -> tuple[bool, str]:
+    """Second pass for a ring that had not uploaded by 08:00.
+
+    The 08:00 job only succeeds once Oura has a row for the note day; when the
+    ring uploads later the note is left showing the failure marker. This runs
+    again mid-morning and no-ops if 08:00 already got a real night, so a good
+    table (and its 'synced 08:00' caption) is never rewritten.
+    """
+    if _oura_synced_today():
+        log.info("Oura already synced today; retry skipped.")
+        return True, "Oura already synced today; retry skipped."
+    log.info("Oura retry: 08:00 had no night data, trying again")
+    return sync_oura()
 
 
 class LogHandler(BaseHTTPRequestHandler):
@@ -971,8 +1009,11 @@ class LogHandler(BaseHTTPRequestHandler):
         elif self.path == "/sync/oura":
             success, message = sync_oura()
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "message": message})
+        elif self.path == "/sync/oura/retry":
+            success, message = sync_oura_retry()
+            self._send_json(200 if success else 500, {"status": "ok" if success else "error", "message": message})
         else:
-            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<box|478|sigh|wimhof|coherent>, /sync/oura, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<box|478|sigh|wimhof|coherent>, /sync/oura, /sync/oura/retry, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
 
     def do_POST(self):
         """Handle all POST endpoints."""
@@ -1002,6 +1043,12 @@ class LogHandler(BaseHTTPRequestHandler):
                             {"status": "ok" if success else "error", "message": message})
             return
 
+        if self.path == "/sync/oura/retry":
+            success, message = sync_oura_retry()
+            self._send_json(200 if success else 500,
+                            {"status": "ok" if success else "error", "message": message})
+            return
+
         if self.path == "/wait5":
             success, count, message = increment_wait5_tally()
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "count": count, "message": message})
@@ -1015,7 +1062,7 @@ class LogHandler(BaseHTTPRequestHandler):
 
         # Endpoints requiring a body
         if self.path not in ("/obsidian/daily", "/obsidian/health"):
-            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<kind>, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning, /wait5, /breathwork/<kind>")
+            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<kind>, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning, /sync/oura/retry, /wait5, /breathwork/<kind>")
             return
 
         content_length = int(self.headers.get("Content-Length", 0))
