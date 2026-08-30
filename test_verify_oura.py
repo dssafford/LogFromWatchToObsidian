@@ -103,6 +103,38 @@ def test_missing_metric_is_reported():
     print("ok test_missing_metric_is_reported")
 
 
+def test_has_verdict_detects_a_pass_line():
+    assert v.has_verdict("| **Readiness** | `57` | - |\n\n*verified 08:05 · matches Oura*\n")
+    print("ok test_has_verdict_detects_a_pass_line")
+
+
+def test_has_verdict_detects_a_warning():
+    assert v.has_verdict("> \u26a0\ufe0f **Bio-Log check FAIL** \u2014 Readiness: note 82 != Oura 57\n")
+    print("ok test_has_verdict_detects_a_warning")
+
+
+def test_has_verdict_false_on_a_fresh_table():
+    """A table the 10:00 retry just wrote carries no verdict yet."""
+    assert not v.has_verdict(PADDED_NOTE.replace("*synced 08:00 \u00b7 Oura*", ""))
+    assert not v.has_verdict(None)
+    print("ok test_has_verdict_false_on_a_fresh_table")
+
+
+def test_synced_caption_is_not_mistaken_for_a_verdict():
+    assert not v.has_verdict("*synced 08:00 \u00b7 Oura*")
+    print("ok test_synced_caption_is_not_mistaken_for_a_verdict")
+
+
+def test_annotate_replaces_rather_than_stacks():
+    """A second run must not leave two verdict lines behind."""
+    import re
+    section = "\n| **Readiness** | `57` | - |\n\n*verified 08:05 \u00b7 matches Oura*\n"
+    cleaned = re.sub(r"\n*" + v.VERDICT_RE, "", section)
+    assert "verified" not in cleaned, cleaned
+    assert "**Readiness**" in cleaned, cleaned
+    print("ok test_annotate_replaces_rather_than_stacks")
+
+
 if __name__ == "__main__":
     fns = [f for k, f in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

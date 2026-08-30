@@ -26,6 +26,19 @@ FAIL = "FAIL"            # table present but disagrees with Oura
 OK_NODATA = "OK-NODATA"  # no table, and Oura still has nothing — correct failure
 LATE = "LATE"            # no table, but Oura has data now — the retry will fix it
 ERROR = "ERROR"          # note or section missing
+SKIP = "SKIP"            # --if-unverified and the section already carries a verdict
+
+# Either shape annotate_note() writes.
+VERDICT_RE = r"(?:\*verified [^\n]*\*|> ⚠️ \*\*Bio-Log check [^\n]*)"
+
+
+def has_verdict(section: str | None) -> bool:
+    """True if this Bio-Log section has already been checked.
+
+    A sync replaces the section wholesale, so a verdict surviving there means
+    the table under it is the one that was verified.
+    """
+    return bool(section and re.search(VERDICT_RE, section))
 
 
 def extract_biolog_section(content: str) -> str | None:
@@ -88,14 +101,20 @@ def annotate_note(path: Path, content: str, verdict: str, detail: str, stamp: st
     if section is None:
         return
     # Drop a previous run's verdict so re-runs don't stack up.
-    cleaned = re.sub(r"\n*(?:\*verified [^\n]*\*|> ⚠️ \*\*Bio-Log check [^\n]*)", "", section)
+    cleaned = re.sub(r"\n*" + VERDICT_RE, "", section)
     start = content.find(BIOLOG_MARKER) + len(BIOLOG_MARKER)
     updated = cleaned.rstrip("\n") + "\n\n" + line + "\n\n\n\n"
     path.write_text(content[:start] + updated + content[start + len(section):])
 
 
-def main() -> int:
-    day = sys.argv[1] if len(sys.argv) > 1 else datetime.now().strftime("%Y-%m-%d")
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Only check a section that lost its verdict to a later sync. Oura can
+    # revise a score during the morning, so re-checking a table that was
+    # already verified would report a mismatch that is not a defect.
+    only_if_unverified = "--if-unverified" in argv
+    argv = [a for a in argv if not a.startswith("--")]
+    day = argv[0] if argv else datetime.now().strftime("%Y-%m-%d")
     stamp = datetime.now().strftime("%H:%M")
 
     note = DAILY_NOTES_FOLDER / f"{day}.md"
@@ -104,6 +123,9 @@ def main() -> int:
         return 1
     content = note.read_text()
     section = extract_biolog_section(content)
+    if only_if_unverified and has_verdict(section):
+        _log(day, SKIP, "already verified since the last write")
+        return 0
     noted = parse_biolog_table(section or "")
 
     try:

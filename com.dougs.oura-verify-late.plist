@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dougs.oura-verify-late</string>
+
+    <key>UserName</key>
+    <string>dougs</string>
+
+    <!-- Five minutes after com.dougs.oura-retry, to check a table the retry
+         wrote after a late ring upload — that write lands with no verdict,
+         because replacing the Bio-Log section discards the 08:05 one.
+         The if-unverified flag makes this a no-op when the section still
+         carries a verdict, so a table checked at 08:05 is left alone: Oura can
+         revise a score during the morning, and re-checking would report a
+         mismatch that is not a defect. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dougs/PycharmProjects/LogFromWatch/.venv/bin/python</string>
+        <string>/Users/dougs/PycharmProjects/LogFromWatch/verify_oura.py</string>
+        <string>--if-unverified</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/dougs/PycharmProjects/LogFromWatch</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>5</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/oura-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/oura-sync.log</string>
+</dict>
+</plist>
