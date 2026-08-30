@@ -145,6 +145,53 @@ def test_token_not_refreshed_when_valid():
     print("ok test_token_not_refreshed_when_valid")
 
 
+# The 2026-08-30 miss: at 08:00 the ring had not uploaded yet, so Oura had no
+# sleep/readiness row for the note day — only the previous night's. Steps (which
+# target the completed previous day) were present as normal.
+STALE_RESPONSES = {
+    "sleep": {"data": [
+        {"day": "2026-08-29", "type": "long_sleep",
+         "total_sleep_duration": 26424, "deep_sleep_duration": 252,
+         "rem_sleep_duration": 5436, "average_hrv": 15, "lowest_heart_rate": 51,
+         "time_in_bed": 31087},
+    ]},
+    "daily_activity": {"data": [
+        {"day": "2026-08-29", "steps": 2347},
+    ]},
+    "daily_readiness": {"data": [
+        {"day": "2026-08-29", "score": 82},
+    ]},
+    "session": {"data": []},
+}
+
+
+def test_missing_night_does_not_reuse_yesterday():
+    """Last night's sleep/readiness must never fall back to an earlier day."""
+    m = oura_client.build_bio_log(STALE_RESPONSES, "2026-08-30")
+    assert m["readiness"] is None, m               # not 82
+    approx(m["sleep"]["total"], 0.0)               # not 7.34h
+    approx(m["hrv"], 0)                            # not 15
+    approx(m["rhr"], 0)                            # not 51
+    assert m["steps"] == 2347, m                   # steps still resolve
+    print("ok test_missing_night_does_not_reuse_yesterday")
+
+
+def test_missing_night_fails_the_sync_guard():
+    """Steps alone must not make a stale table look like a successful sync."""
+    m = oura_client.build_bio_log(STALE_RESPONSES, "2026-08-30")
+    assert not oura_client.has_real_data(m), m
+    print("ok test_missing_night_fails_the_sync_guard")
+
+
+def test_steps_keep_their_backward_fallback():
+    """Steps target a completed day, so an older activity row is still valid."""
+    responses = dict(STALE_RESPONSES)
+    responses["daily_activity"] = {"data": [{"day": "2026-08-27", "steps": 6402}]}
+    m = oura_client.build_bio_log(responses, "2026-08-30")
+    assert m["steps"] == 6402, m
+    print("ok test_steps_keep_their_backward_fallback")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

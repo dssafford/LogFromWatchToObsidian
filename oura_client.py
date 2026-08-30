@@ -224,13 +224,23 @@ def _hours(seconds) -> float:
     return round((seconds or 0) / 3600.0, 2)
 
 
-def _pick_for_day(records: list, target_day: str, day_key: str = "day"):
-    """Record whose day == target; else latest on/before target; else latest."""
+def _pick_for_day(records: list, target_day: str, day_key: str = "day",
+                  exact: bool = False):
+    """Record whose day == target; else latest on/before target; else latest.
+
+    Pass exact=True for last night's sleep/readiness. Oura publishes those only
+    once the ring uploads, so before that the note day simply has no row, and
+    the nearest-earlier fallback would silently republish the previous night as
+    this morning's (on 2026-08-30 that wrote readiness 82 when it was 57).
+    Steps keep the fallback on purpose — they target an already-completed day.
+    """
     if not records:
         return None
-    exact = [r for r in records if r.get(day_key) == target_day]
+    matches = [r for r in records if r.get(day_key) == target_day]
+    if matches:
+        return matches[-1]
     if exact:
-        return exact[-1]
+        return None
     earlier = [r for r in records if r.get(day_key, "") <= target_day]
     if earlier:
         return max(earlier, key=lambda r: r.get(day_key, ""))
@@ -258,7 +268,7 @@ def build_bio_log(responses: dict, day: str) -> dict:
     # Sleep — last night's main sleep only (ignore naps)
     sleep_records = responses.get("sleep", {}).get("data", []) or []
     long_sleep = [r for r in sleep_records if r.get("type") == "long_sleep"] or sleep_records
-    s = _pick_for_day(long_sleep, day)
+    s = _pick_for_day(long_sleep, day, exact=True)
     if s:
         total_h = _hours(s.get("total_sleep_duration"))
         deep_h = _hours(s.get("deep_sleep_duration"))
@@ -276,7 +286,8 @@ def build_bio_log(responses: dict, day: str) -> dict:
     steps = int(act.get("steps", 0)) if act else 0
 
     # Readiness — today's score
-    rd = _pick_for_day(responses.get("daily_readiness", {}).get("data", []) or [], day)
+    rd = _pick_for_day(responses.get("daily_readiness", {}).get("data", []) or [],
+                       day, exact=True)
     readiness = int(rd["score"]) if rd and rd.get("score") is not None else None
 
     # Mindful — sum meditation/breathing session minutes that occurred yesterday
@@ -296,10 +307,20 @@ def build_bio_log(responses: dict, day: str) -> dict:
         "rhr": rhr,
         "readiness": readiness,
         "mindful": round(mindful),
+        # False when Oura has no row for `day` yet (ring not uploaded).
+        "has_night_data": s is not None or rd is not None,
     }
 
 
 def has_real_data(m: dict) -> bool:
+    """True only when the note day's own night made it into `m`.
+
+    Steps alone are not enough: they come from the previous, already-completed
+    day and are present even when last night has not uploaded yet — precisely
+    the case that must fail loudly instead of writing a stale-looking table.
+    """
+    if not m.get("has_night_data"):
+        return False
     return (m["steps"] > 0 or m["sleep"]["total"] > 0 or m["hrv"] > 0
             or m["rhr"] > 0 or (m.get("readiness") or 0) > 0 or m["mindful"] > 0)
 
