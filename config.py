@@ -53,6 +53,13 @@ SECTIONS = {
         "marker": "## 📝 Daily Log",
         "format": FORMAT_PLAIN,
     },
+    # Mindful moments are Daily Log lines: the "Moments today" dataviewjs block
+    # in the note template only scrapes (mindful::) tags from inside that
+    # section, so this must share the marker with "log".
+    "mindful": {
+        "marker": "## 📝 Daily Log",
+        "format": FORMAT_PLAIN,
+    },
 
     # === Evening ===
     "gratitude": {

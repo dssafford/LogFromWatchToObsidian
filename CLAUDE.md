@@ -4,33 +4,58 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-LogFromWatch is a macOS utility that captures reminders from the Apple Reminders app (specifically a list named "Log") and appends them to Obsidian daily notes. It's designed for logging quick notes captured on Apple Watch to a markdown-based note system.
+LogFromWatch captures quick notes from an Apple Watch and appends them to
+Obsidian daily notes. Capture happens two ways: iOS Shortcuts drop JSON files
+into iCloud folders, and Shortcuts POST directly to the local HTTP server.
+
+The Apple Reminders path (an `osascript` poll of a list named "Log") was
+**removed** — there is no `REMINDERS_LIST` constant and no AppleScript in this
+repo. Ignore any older description that says otherwise.
 
 ## How It Works
 
-1. Uses AppleScript via `osascript` to fetch incomplete reminders from the "Log" list in Apple Reminders
-2. Marks fetched reminders as complete
-3. Appends entries to the current day's Obsidian daily note with timestamps
+1. `main.py` runs every 180s under launchd and drains `ICLOUD_INPUT_FOLDERS`
+   of `*.json` / `*.txt` drops, routing each through `process_entry()`
+2. `server.py` serves the same `process_entry()` over HTTP on port 9847
+3. Both append to the current day's daily note, under the section named by the
+   payload's `section` key
+4. A failed entry's file is left in place, so the next run retries it
 
-## Running the Script
+## Running
 
 ```bash
-python main.py
+uv run --project . python main.py     # one drain pass
+uv run --project . python server.py   # the HTTP server
 ```
 
-The script requires no external dependencies beyond Python 3.11.9+ standard library.
+Stdlib only apart from the `things` package (Things 3 sync).
 
 ## Configuration
 
-Hardcoded paths in `main.py`:
-- `DAILY_NOTES_FOLDER`: Path to Obsidian daily notes directory
-- `REMINDERS_LIST`: Name of the Reminders list to pull from ("Log")
+All in `config.py`, not `main.py`:
+- `DAILY_NOTES_FOLDER` — Obsidian daily notes directory
+- `TEMPLATE_PATH` — daily note template used to create a missing note
+- `ICLOUD_INPUT_FOLDERS` — where Shortcuts drop capture files
+- `SECTIONS` — the marker/format registry mapping a payload's `section` name to
+  a literal marker string in the note. **This is the extension point**: adding a
+  capture target is usually one entry here plus a branch in `process_entry()`.
+
+## Tests
+
+No pytest and no CI. Each `test_*.py` is a standalone script of bare-assert
+functions with a discovery footer; run them individually:
+
+```bash
+uv run --project . python test_mindful.py
+```
+
+Tests that exercise a write path monkeypatch `server.get_daily_note_path` to a
+tempfile. Never point a test at the real vault.
 
 ## Requirements
 
-- macOS (uses AppleScript for Reminders integration)
+- macOS
 - Python 3.11.9+
-- Access to Apple Reminders app
 - Obsidian vault with daily notes folder
 
 ## HTTP Server Endpoints
@@ -41,23 +66,56 @@ Hardcoded paths in `main.py`:
 
 Restart after changes: `launchctl kickstart -k gui/$UID/com.dougs.logserver`
 
-### Tally endpoints (GET or POST, no body)
-Increment a counter on a `**Label:**` `` `N` `` line in today's daily note.
+> The launchd agent is **not currently installed** on this machine — the plists
+> live in the repo but nothing is registered in `~/Library/LaunchAgents/`, so
+> `kickstart` returns 503 and nothing listens on 9847. Run `server.py` by hand,
+> or install the plist, before testing endpoints.
 
-| Endpoint | Daily note line |
+### Mindful moments (GET or POST)
+
+Mindful moments are **Daily Log lines**, not their own section — the
+`Moments today` dataviewjs block in the note template scrapes `(mindful::)`
+tags only from inside `## 📝 Daily Log`. A line written anywhere else is
+invisible to it.
+
+```
+- 16:30 walked out of the workshop into the parking lot (mood::calm) (intensity::3) (mindful::arrived)
+```
+
+Two capture paths, both landing on the same composed line:
+
+| Path | Payload |
 | :--- | :--- |
-| `/wait5` | `**Wait-5 Tally:**` |
-| `/breathwork/box` | `- Box Breathing (4-4-4-4):` |
-| `/breathwork/478` | `- 4-7-8 Breathing:` |
-| `/breathwork/sigh` | `- Physiological Sigh:` |
-| `/breathwork/wimhof` | `- Wim Hof / Power Breath:` |
-| `/breathwork/coherent` | `- Coherent Breathing (5-5):` |
+| `POST /mindful` | `{"text":"…","mood":"calm","intensity":3,"kind":"arrived"}` |
+| `GET /mindful?…` | `kind=arrived&mood=calm&intensity=3&text=…` |
+| Watch dictation | `POST /obsidian/daily` with `{"section":"mindful","text":"<utterance>"}`, or the same JSON dropped in an iCloud folder |
 
-Response: `{"status":"ok","count":N,"message":"ok"}` (breathwork also includes `"kind"`).
+The dictated path scans the whole utterance for vocabulary — word order does not
+matter. `mindful walked out of the workshop actually there calm three arrived`
+and `mindful arrived calm 3 walked out of the workshop` produce the same line.
+
+Vocabulary lives in `mindful.py`:
+- `mindful::` — `arrived`, `stopped`, `noticed`, `present`, `returned`
+- `mood::` — 15 canonical words drawn from the vault's own tag history
+- `intensity::` — 1–5 only; the template regex matches a **single digit**
+
+Aliases are mapped first (`peaceful`→`calm`, `landed`→`arrived`). An unrecognized
+word is never fatal: it stays in the prose and the line is written untagged, with
+a warning in the response. Only an unknown `kind` on the structured endpoint is
+rejected, with the valid list in `valid_kinds`.
+
+### Retired endpoints
+
+`/wait5` and `/breathwork/<box|478|sigh|wimhof|coherent>` still exist in
+`server.py` but are **dead**. Their `**Wait-5 Tally:**` / `- Box Breathing…`
+markers were removed from the daily note template on 2026-08-31, so they now
+return "marker not found". The last note containing them is `2026-07-01.md`.
 
 ### Other endpoints
 - `GET /health` — liveness check
 - `POST /obsidian/daily` — append entry; body `{"section":"...","text":"..."}`
+  (valid sections are the keys of `SECTIONS` in `config.py`)
+- `GET|POST /mindful` — log a mindful moment (see above)
 - `POST /obsidian/health` — ingest Auto Health Export JSON, writes to biolog
 - `POST /sync/things3` — pull Today tasks into morningset
 - `POST /sync/icloud` — process pending iCloud JSON files

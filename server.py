@@ -21,12 +21,18 @@ import time
 from datetime import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 from typing import Any
 
 import things
 
 from config import DAILY_NOTES_FOLDER, TEMPLATE_PATH, SECTIONS, LOG_FILE, ICLOUD_INPUT_FOLDERS
 from config import FORMAT_PLAIN, FORMAT_BLOCKQUOTE, FORMAT_BULLET, FORMAT_NUMBERED, FORMAT_CHECKBOX, FORMAT_BULLET_CHECKBOX
+from mindful import (
+    MINDFUL_WORDS, MOOD_WORDS,
+    compose_line, parse_dictation,
+    normalize_mood, normalize_kind, normalize_intensity,
+)
 
 # Server config
 HOST = "0.0.0.0"  # Listen on all interfaces (needed for Tailscale)
@@ -259,7 +265,17 @@ def process_entry(entry: dict) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to read daily note: {e}"
 
-    if add_timestamp and section == "log":
+    unknown_words: list[str] = []
+    if section == "mindful":
+        # Mindful lines always carry HH:MM regardless of the timestamp flag --
+        # the time is what populates the Time column in the Moments dataviewjs.
+        formatted_lines = []
+        for t in texts:
+            parsed = parse_dictation(t)
+            unknown_words.extend(parsed["unknown"])
+            formatted_lines.append(compose_line(
+                parsed["prose"], parsed["mood"], parsed["intensity"], parsed["kind"]))
+    elif add_timestamp and section == "log":
         time_str = datetime.now().strftime("%H:%M")
         formatted_lines = [f"- {time_str} {t}" for t in texts]
     else:
@@ -278,6 +294,9 @@ def process_entry(entry: dict) -> tuple[bool, str]:
     try:
         daily_note.write_text(new_content)
         log.info(f"Wrote to {section}: {texts[0][:50]}...")
+        if unknown_words:
+            log.info(f"Unrecognized words left in prose: {unknown_words}")
+            return True, f"OK: wrote to {section} (untagged: {', '.join(unknown_words)})"
         return True, f"OK: wrote to {section}"
     except Exception as e:
         return False, f"Failed to write daily note: {e}"
@@ -580,6 +599,77 @@ def increment_breathwork_tally(kind: str) -> tuple[bool, int, str]:
         return True, new_count, "ok"
     except Exception as e:
         return False, 0, f"Failed to write daily note: {e}"
+
+
+# --- Mindful moments ---
+
+def handle_mindful(params: dict) -> tuple[bool, dict]:
+    """Write one mindful moment from structured fields.
+
+    Unlike the dictated path, the caller here named its fields, so an unknown
+    `kind` is worth rejecting outright -- a Shortcut can surface the valid list
+    immediately. An unknown `mood` or `intensity` only degrades to an untagged
+    line, because a captured moment should never be lost over a stray word.
+    """
+    warnings: list[str] = []
+
+    raw_kind = params.get("kind") or params.get("mindful")
+    kind = normalize_kind(raw_kind)
+    if not kind:
+        return False, {
+            "message": f"Unknown mindful kind: {raw_kind!r}",
+            "valid_kinds": list(MINDFUL_WORDS),
+        }
+
+    raw_mood = params.get("mood")
+    mood = normalize_mood(raw_mood)
+    if raw_mood and not mood:
+        warnings.append(f"unknown mood {raw_mood!r} - left untagged")
+
+    raw_intensity = params.get("intensity")
+    intensity = normalize_intensity(raw_intensity)
+    if raw_intensity not in (None, "") and not intensity:
+        warnings.append(f"intensity {raw_intensity!r} out of range 1-5 - left untagged")
+
+    prose = (params.get("text") or params.get("prose") or "").strip()
+    line = compose_line(prose, mood, intensity, kind)
+
+    daily_note = get_daily_note_path()
+    if not daily_note.exists():
+        # Match the "log" section: never create the note, to avoid racing
+        # Obsidian sync. The watch path retries until the note exists.
+        return False, {"message": "Daily note doesn't exist yet - skipping to avoid sync conflict"}
+
+    marker = SECTIONS["mindful"]["marker"]
+    try:
+        content = daily_note.read_text()
+    except Exception as e:
+        return False, {"message": f"Failed to read daily note: {e}"}
+
+    new_content = insert_at_marker(content, marker, line, "end")
+    if new_content is None:
+        return False, {"message": f"Marker '{marker}' not found in daily note"}
+
+    try:
+        daily_note.write_text(new_content)
+    except Exception as e:
+        return False, {"message": f"Failed to write daily note: {e}"}
+
+    log.info(f"Mindful moment: {line}")
+    return True, {
+        "message": "ok",
+        "line": line,
+        "kind": kind,
+        "mood": mood,
+        "intensity": intensity,
+        "warnings": warnings,
+    }
+
+
+def mindful_params_from_query(path: str) -> dict:
+    """Flatten a GET query string into the dict handle_mindful expects."""
+    query = parse_qs(urlparse(path).query)
+    return {k: v[0] for k, v in query.items() if v}
 
 
 def sync_morning() -> dict:
@@ -1006,6 +1096,10 @@ class LogHandler(BaseHTTPRequestHandler):
             kind = self.path[len("/breathwork/"):]
             success, count, message = increment_breathwork_tally(kind)
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "kind": kind, "count": count, "message": message})
+        elif self.path.split("?")[0] == "/mindful":
+            success, result = handle_mindful(mindful_params_from_query(self.path))
+            self._send_json(200 if success else 400,
+                            {"status": "ok" if success else "error", **result})
         elif self.path == "/sync/oura":
             success, message = sync_oura()
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "message": message})
@@ -1013,7 +1107,7 @@ class LogHandler(BaseHTTPRequestHandler):
             success, message = sync_oura_retry()
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "message": message})
         else:
-            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<box|478|sigh|wimhof|coherent>, /sync/oura, /sync/oura/retry, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
 
     def do_POST(self):
         """Handle all POST endpoints."""
@@ -1061,12 +1155,26 @@ class LogHandler(BaseHTTPRequestHandler):
             return
 
         # Endpoints requiring a body
-        if self.path not in ("/obsidian/daily", "/obsidian/health"):
-            self._send_response(404, "Endpoints: GET /wait5, /breathwork/<kind>, POST /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning, /sync/oura/retry, /wait5, /breathwork/<kind>")
+        if self.path not in ("/obsidian/daily", "/obsidian/health", "/mindful"):
+            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
             return
 
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length).decode()
+
+        if self.path == "/mindful":
+            try:
+                params = json.loads(body) if body.strip() else {}
+            except json.JSONDecodeError as e:
+                self._send_json(400, {"status": "error", "message": f"Invalid JSON: {e}"})
+                return
+            if not isinstance(params, dict):
+                self._send_json(400, {"status": "error", "message": "Body must be a JSON object"})
+                return
+            success, result = handle_mindful(params)
+            self._send_json(200 if success else 400,
+                            {"status": "ok" if success else "error", **result})
+            return
 
         # Health endpoint tolerates CSV (shortcut format reverts) and gives an
         # actionable error on empty bodies instead of the opaque char-0 message.
