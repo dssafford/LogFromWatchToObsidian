@@ -82,13 +82,29 @@ done
 `launchctl list | grep dougs` shows what is registered; `launchctl bootout
 gui/$UID/<label>` removes one.
 
-**Known issue — Things 3 and Full Disk Access.** A launchd-spawned process does
-not inherit the TCC permission a terminal has, so `things.today()` fails under
-launchd with `unable to open database file` while working fine from a shell.
-This silently breaks `/sync/things3` and `/sync/morning`, and the endpoint still
-returns `{"status":"ok","success":0,"failed":0}` — a hard read failure is
-reported as success. Granting Full Disk Access to the `uv` binary (or to
-`launchd`) is the fix; until then, treat a `success: 0` Things3 sync as suspect.
+**Production host is the Mac Studio** (`mac-studio`, Tailscale `100.104.66.106`).
+It runs all six agents and is the single writer to the Obsidian vault. Don't
+install these agents on a second machine — the vault syncs between them, so two
+hosts would double-write the daily note.
+
+**Things 3 and Full Disk Access.** A launchd-spawned process only reads the
+Things 3 database if that machine has granted Full Disk Access; without it,
+`things.today()` raises `unable to open database file` under launchd while
+working fine from a terminal. The Mac Studio **has** the grant — verified, both
+`logfromwatch` and `logserver` read Today tasks under launchd. A machine without
+it will fail silently.
+
+**Silently is the operative word.** `/sync/things3` returns the same body for a
+hard failure and a successful no-op:
+
+```
+{"status":"ok","success":0,"failed":0}   # DB read failed
+{"status":"ok","success":0,"failed":0}   # worked, already synced today
+```
+
+The response cannot distinguish them — only `/tmp/logserver.stderr.log` can.
+That ambiguity is worth fixing if this bites again; until then, check the log
+rather than trusting a `success: 0`.
 
 ### Mindful moments (GET or POST)
 
