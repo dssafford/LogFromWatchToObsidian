@@ -30,7 +30,7 @@ from config import DAILY_NOTES_FOLDER, TEMPLATE_PATH, SECTIONS, LOG_FILE, ICLOUD
 from config import FORMAT_PLAIN, FORMAT_BLOCKQUOTE, FORMAT_BULLET, FORMAT_NUMBERED, FORMAT_CHECKBOX, FORMAT_BULLET_CHECKBOX
 from mindful import (
     MINDFUL_WORDS, MOOD_WORDS,
-    compose_line, parse_dictation,
+    compose_line, parse_dictation, normalize_time, extract_leading_time,
     normalize_mood, normalize_kind, normalize_intensity,
 )
 
@@ -274,7 +274,8 @@ def process_entry(entry: dict) -> tuple[bool, str]:
             parsed = parse_dictation(t)
             unknown_words.extend(parsed["unknown"])
             formatted_lines.append(compose_line(
-                parsed["prose"], parsed["mood"], parsed["intensity"], parsed["kind"]))
+                parsed["prose"], parsed["mood"], parsed["intensity"], parsed["kind"],
+                time=parsed["time"]))
     elif add_timestamp and section == "log":
         time_str = datetime.now().strftime("%H:%M")
         formatted_lines = [f"- {time_str} {t}" for t in texts]
@@ -632,7 +633,16 @@ def handle_mindful(params: dict) -> tuple[bool, dict]:
         warnings.append(f"intensity {raw_intensity!r} out of range 1-5 - left untagged")
 
     prose = (params.get("text") or params.get("prose") or "").strip()
-    line = compose_line(prose, mood, intensity, kind)
+
+    # An explicit time wins; otherwise honour one the client stamped onto the text.
+    raw_time = params.get("time")
+    moment_time = normalize_time(raw_time)
+    if raw_time and not moment_time:
+        warnings.append(f"unrecognized time {raw_time!r} - used the clock instead")
+    if not moment_time:
+        moment_time, prose = extract_leading_time(prose)
+
+    line = compose_line(prose, mood, intensity, kind, time=moment_time)
 
     daily_note = get_daily_note_path()
     if not daily_note.exists():

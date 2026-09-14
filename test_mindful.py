@@ -19,6 +19,8 @@ from mindful import (
     normalize_mood,
     parse_dictation,
     strip_tags,
+    extract_leading_time,
+    normalize_time,
 )
 
 NOW = datetime(2026, 9, 13, 16, 30)
@@ -239,6 +241,90 @@ def test_query_params_are_flattened():
     assert got == {"kind": "arrived", "mood": "calm", "intensity": "3",
                    "text": "paused before the call"}, got
     print("ok test_query_params_are_flattened")
+
+
+def test_a_client_supplied_time_wins_over_the_clock():
+    # The Daily Log shortcut stamps the moment itself; that time is when it
+    # happened, which beats when the server got around to it.
+    p = parse_dictation("16:30 walked out of the workshop calm three arrived")
+    assert p["time"] == "16:30", p
+    # A clock deliberately different from the stamp, so this can actually fail.
+    late = datetime(2026, 9, 13, 20, 5)
+    line = compose_line(p["prose"], p["mood"], p["intensity"], p["kind"],
+                        now=late, time=p["time"])
+    assert line.startswith("- 16:30 "), line
+    assert "20:05" not in line, line
+    print("ok test_a_client_supplied_time_wins_over_the_clock")
+
+
+def test_no_double_timestamp():
+    p = parse_dictation("16:30 walked out of the workshop calm three arrived")
+    line = compose_line(p["prose"], p["mood"], p["intensity"], p["kind"],
+                        now=NOW, time=p["time"])
+    assert len(DV_TIME.findall(line)) == 1, line
+    assert DV_TIME.search(line).group(1) == "16:30", line
+    print("ok test_no_double_timestamp")
+
+
+def test_leading_date_and_dash_are_consumed():
+    t, rest = extract_leading_time("2026-09-13 16:30 - walked out")
+    assert t == "16:30", t
+    assert rest.strip() == "walked out", repr(rest)
+    print("ok test_leading_date_and_dash_are_consumed")
+
+
+def test_trigger_and_stamp_in_either_order():
+    a = parse_dictation("16:30 mindful paused at the gate calm")
+    b = parse_dictation("mindful 16:30 paused at the gate calm")
+    for got in (a, b):
+        assert got["time"] == "16:30", got
+        assert got["kind"] == "stopped", got
+        assert "mindful" not in got["prose"], got
+    assert a["prose"] == b["prose"] == "at the gate", (a, b)
+    print("ok test_trigger_and_stamp_in_either_order")
+
+
+def test_a_time_inside_the_prose_is_left_alone():
+    # "met at 3:00" must not donate its 3 to intensity, nor be read as the stamp.
+    p = parse_dictation("noticed we met at 3:00 and it was calm")
+    assert p["time"] is None, p
+    assert p["intensity"] is None, p
+    assert "3:00" in p["prose"], p
+    print("ok test_a_time_inside_the_prose_is_left_alone")
+
+
+def test_clock_is_used_when_no_stamp_supplied():
+    p = parse_dictation("mindful walked out of the workshop calm three arrived")
+    assert p["time"] is None, p
+    line = compose_line(p["prose"], p["mood"], p["intensity"], p["kind"], now=NOW)
+    assert line.startswith("- 16:30 "), line   # NOW is 16:30
+    print("ok test_clock_is_used_when_no_stamp_supplied")
+
+
+def test_normalize_time_pads_and_rejects():
+    assert normalize_time("9:05") == "09:05"
+    assert normalize_time("16:30") == "16:30"
+    assert normalize_time("23:59") == "23:59"
+    assert normalize_time("24:00") is None
+    assert normalize_time("16:60") is None
+    assert normalize_time("half past") is None
+    assert normalize_time(None) is None
+    print("ok test_normalize_time_pads_and_rejects")
+
+
+def test_handle_mindful_honours_an_explicit_time():
+    note = _temp_note()
+    orig = server.get_daily_note_path
+    server.get_daily_note_path = lambda *a, **k: note
+    try:
+        ok, result = server.handle_mindful({
+            "text": "16:30 walked out of the workshop", "kind": "arrived"})
+    finally:
+        server.get_daily_note_path = orig
+    assert ok, result
+    assert result["line"].startswith("- 16:30 "), result
+    assert len(DV_TIME.findall(result["line"])) == 1, result
+    print("ok test_handle_mindful_honours_an_explicit_time")
 
 
 if __name__ == "__main__":
