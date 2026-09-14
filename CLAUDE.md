@@ -66,10 +66,29 @@ tempfile. Never point a test at the real vault.
 
 Restart after changes: `launchctl kickstart -k gui/$UID/com.dougs.logserver`
 
-> The launchd agent is **not currently installed** on this machine — the plists
-> live in the repo but nothing is registered in `~/Library/LaunchAgents/`, so
-> `kickstart` returns 503 and nothing listens on 9847. Run `server.py` by hand,
-> or install the plist, before testing endpoints.
+### Installing the launch agents
+
+Six agents drive this repo: `logserver` (the HTTP server, KeepAlive),
+`logfromwatch` (main.py every 180s), and four Oura agents on calendar triggers
+(sync 08:00, verify 08:05, retry 10:00, verify-late 10:05). To install:
+
+```bash
+cp com.dougs.*.plist ~/Library/LaunchAgents/
+for f in ~/Library/LaunchAgents/com.dougs.*.plist; do
+  launchctl bootstrap gui/$UID "$f"
+done
+```
+
+`launchctl list | grep dougs` shows what is registered; `launchctl bootout
+gui/$UID/<label>` removes one.
+
+**Known issue — Things 3 and Full Disk Access.** A launchd-spawned process does
+not inherit the TCC permission a terminal has, so `things.today()` fails under
+launchd with `unable to open database file` while working fine from a shell.
+This silently breaks `/sync/things3` and `/sync/morning`, and the endpoint still
+returns `{"status":"ok","success":0,"failed":0}` — a hard read failure is
+reported as success. Granting Full Disk Access to the `uv` binary (or to
+`launchd`) is the fix; until then, treat a `success: 0` Things3 sync as suspect.
 
 ### Mindful moments (GET or POST)
 
