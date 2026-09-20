@@ -10,3 +10,7 @@ oura_tokens.json
 
 # Runtime state (Oura once-per-day retry guard)
 .oura_last_run.json
+
+# Python bytecode
+__pycache__/
+*.pyc
