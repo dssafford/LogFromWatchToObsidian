@@ -61,8 +61,11 @@ tempfile. Never point a test at the real vault.
 ## HTTP Server Endpoints
 
 `server.py` runs on port `9847` via `com.dougs.logserver` launchd agent. Reachable at:
-- Local: `http://192.168.4.145:9847`
-- Tailscale: `http://100.104.66.106:9847`
+- Local: `http://<studio-lan-ip>:9847`
+- Tailscale: `http://<studio-tailscale-ip>:9847`
+
+This repo is public, so the addresses are left out on purpose. `tailscale
+status` and `ipconfig getifaddr en0` on the Studio give the current ones.
 
 Restart after changes: `launchctl kickstart -k gui/$UID/com.dougs.logserver`
 
@@ -82,7 +85,7 @@ done
 `launchctl list | grep dougs` shows what is registered; `launchctl bootout
 gui/$UID/<label>` removes one.
 
-**Production host is the Mac Studio** (`mac-studio`, Tailscale `100.104.66.106`).
+**Production host is the Mac Studio** (`mac-studio`).
 It runs all seven agents and is the single writer to the Obsidian vault. Don't
 install these agents on a second machine — the vault syncs between them, so two
 hosts would double-write the daily note.
