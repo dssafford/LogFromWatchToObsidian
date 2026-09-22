@@ -68,9 +68,9 @@ Restart after changes: `launchctl kickstart -k gui/$UID/com.dougs.logserver`
 
 ### Installing the launch agents
 
-Six agents drive this repo: `logserver` (the HTTP server, KeepAlive),
-`logfromwatch` (main.py every 180s), and four Oura agents on calendar triggers
-(sync 08:00, verify 08:05, retry 10:00, verify-late 10:05). To install:
+Seven agents drive this repo: `logserver` (the HTTP server, KeepAlive),
+`logfromwatch` (main.py every 180s), and five Oura agents on calendar triggers
+(sync 08:00, verify 08:05, retry 10:00, verify-late 10:05, heartbeat 10:15). To install:
 
 ```bash
 cp com.dougs.*.plist ~/Library/LaunchAgents/
@@ -83,9 +83,17 @@ done
 gui/$UID/<label>` removes one.
 
 **Production host is the Mac Studio** (`mac-studio`, Tailscale `100.104.66.106`).
-It runs all six agents and is the single writer to the Obsidian vault. Don't
+It runs all seven agents and is the single writer to the Obsidian vault. Don't
 install these agents on a second machine — the vault syncs between them, so two
 hosts would double-write the daily note.
+
+**The Tailscale CLI does not work under launchd.**
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale status --json` prints
+"The Tailscale GUI failed to start" and exits 0 with no JSON when run from a
+launchd agent -- it needs a GUI session, which is why it works over SSH but not
+on a timer. Homebrew's `tailscale` is no help either: it talks to a separate,
+logged-out `tailscaled`. `heartbeat_oura.py` therefore tests the phone with
+plain ICMP instead of asking Tailscale anything.
 
 **Things 3 and Full Disk Access.** A launchd-spawned process only reads the
 Things 3 database if that machine has granted Full Disk Access; without it,

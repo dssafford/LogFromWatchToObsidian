@@ -11,6 +11,9 @@ oura_tokens.json
 # Runtime state (Oura once-per-day retry guard)
 .oura_last_run.json
 
+# Runtime state (last non-loopback Shortcut check-in)
+.shortcut_last_seen.json
+
 # Python bytecode
 __pycache__/
 *.pyc

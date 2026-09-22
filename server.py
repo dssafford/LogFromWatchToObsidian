@@ -15,6 +15,7 @@ import csv
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -1022,6 +1023,30 @@ def _mark_oura_synced() -> None:
         log.warning(f"Could not write Oura state file: {e}")
 
 
+SHORTCUT_STATE_FILE = Path(__file__).resolve().parent / ".shortcut_last_seen.json"
+
+
+def _record_shortcut_checkin(client_ip: str, path: str) -> None:
+    """Remember when the iPhone Shortcut last reached us.
+
+    Only non-loopback hits on the Oura endpoints count: the 08:00 cron calls
+    the same paths over 127.0.0.1, and a laptop poking /health is not the
+    phone. heartbeat_oura.py reads this to tell a dead Shortcut channel from a
+    merely quiet one -- when the phone leaves the tailnet the request never
+    arrives, so silence here is the only trace.
+    """
+    if not path.startswith("/sync/oura"):
+        return
+    if client_ip.startswith("127.") or client_ip == "::1":
+        return
+    try:
+        tmp = SHORTCUT_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"ts": time.time(), "ip": client_ip}))
+        os.replace(tmp, SHORTCUT_STATE_FILE)  # atomic; the server is threaded
+    except OSError as e:
+        log.warning(f"Could not record Shortcut check-in: {e}")
+
+
 def sync_oura() -> tuple[bool, str]:
     """Pull today's Bio-Log from the Oura API and write it to the daily note."""
     try:
@@ -1121,6 +1146,7 @@ class LogHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle all POST endpoints."""
+        _record_shortcut_checkin(self.client_address[0], self.path)
         # Sync endpoints (no body required)
         if self.path == "/sync/things3":
             log.info("Sync: Things3")

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.dougs.oura-heartbeat</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/dougs/PycharmProjects/LogFromWatch/.venv/bin/python</string>
+		<string>/Users/dougs/PycharmProjects/LogFromWatch/heartbeat_oura.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/tmp/oura-heartbeat.log</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/oura-heartbeat.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>10</integer>
+		<key>Minute</key>
+		<integer>15</integer>
+	</dict>
+	<key>UserName</key>
+	<string>dougs</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/dougs/PycharmProjects/LogFromWatch</string>
+</dict>
+</plist>
