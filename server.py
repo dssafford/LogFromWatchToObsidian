@@ -373,14 +373,21 @@ def load_json_file(file_path: Path, retries: int = 5, delay: float = 5) -> dict 
     return None
 
 
-def sync_icloud_files() -> tuple[int, int]:
-    """Process JSON files from iCloud folders. Returns (success_count, fail_count)."""
+def sync_icloud_files() -> dict:
+    """Process JSON files from iCloud folders.
+
+    Returns a dict {status, success, failed, files_found, message}. The status
+    distinguishes "no-files" (unambiguous no-op) from "all-failed" (files were
+    there but every one broke) and "partial" (some worked, some didn't) --
+    previously both no-op and no-files came back as (0, 0).
+    """
     daily_note = get_daily_note_path()
     if not daily_note.exists():
         ensure_daily_note_exists(daily_note)
     if not daily_note.exists():
         log.error("Daily note does not exist and could not be created")
-        return 0, 1
+        return {"status": "note-missing", "success": 0, "failed": 1, "files_found": 0,
+                "message": "Daily note does not exist and could not be created"}
 
     json_files = []
     for folder in ICLOUD_INPUT_FOLDERS:
@@ -393,7 +400,8 @@ def sync_icloud_files() -> tuple[int, int]:
 
     if not json_files:
         log.info("iCloud: No files to process")
-        return 0, 0
+        return {"status": "no-files", "success": 0, "failed": 0, "files_found": 0,
+                "message": "no files present"}
 
     log.info(f"iCloud: Found {len(json_files)} file(s)")
 
@@ -421,19 +429,38 @@ def sync_icloud_files() -> tuple[int, int]:
             log.error(f"Failed to process {json_file.name}: {message}")
             fail_count += 1
 
-    return success_count, fail_count
+    files_found = len(json_files)
+    if fail_count == 0:
+        status, message = "ok", f"processed {success_count} file(s)"
+    elif success_count == 0:
+        status, message = "all-failed", f"all {fail_count} file(s) failed"
+    else:
+        status = "partial"
+        message = f"processed {success_count} of {files_found}, {fail_count} failed"
+    return {"status": status, "success": success_count, "failed": fail_count,
+            "files_found": files_found, "message": message}
 
 
 # --- Things3 sync ---
+
+class Things3DbError(Exception):
+    """Raised when the Things 3 SQLite database is unreadable.
+
+    Distinguishes a hard DB failure ("unable to open database file" under
+    launchd without Full Disk Access) from a legit empty Today list. Before
+    this existed, both paths returned an empty list and the /sync/things3
+    response was identical.
+    """
+
 
 def get_things3_today_tasks() -> list[dict]:
     """Fetch Today tasks from Things 3, sorted by today_index."""
     try:
         tasks = things.today()
-        return sorted(tasks, key=lambda t: t.get('today_index', 0))
     except Exception as e:
         log.error(f"Failed to fetch Things3 tasks: {e}")
-        return []
+        raise Things3DbError(str(e)) from e
+    return sorted(tasks, key=lambda t: t.get('today_index', 0))
 
 
 def format_things3_task(task: dict) -> str:
@@ -445,12 +472,19 @@ def format_things3_task(task: dict) -> str:
     return title
 
 
-def sync_things3_tasks() -> tuple[int, int]:
-    """Sync Things3 Today tasks to the morningset section. Returns (success_count, fail_count)."""
+def sync_things3_tasks() -> dict:
+    """Sync Things 3 Today tasks to the morningset section.
+
+    Returns a dict {status, success, failed, message}. Callers previously got
+    only (success, failed), so a hard DB failure and a legit "no tasks today"
+    both surfaced as (0, 0) -- CLAUDE.md flags this as a real footgun. The
+    status field makes them distinguishable.
+    """
     config = SECTIONS.get("morningset")
     if not config:
         log.error("morningset section not configured")
-        return 0, 1
+        return {"status": "config-missing", "success": 0, "failed": 1,
+                "message": "morningset section not configured"}
 
     marker = config["marker"]
     position = config.get("position", "end")
@@ -460,12 +494,19 @@ def sync_things3_tasks() -> tuple[int, int]:
         ensure_daily_note_exists(daily_note)
     if not daily_note.exists():
         log.error("Daily note does not exist and could not be created")
-        return 0, 1
+        return {"status": "note-missing", "success": 0, "failed": 1,
+                "message": "Daily note does not exist and could not be created"}
 
-    tasks = get_things3_today_tasks()
+    try:
+        tasks = get_things3_today_tasks()
+    except Things3DbError as e:
+        return {"status": "db-read-failed", "success": 0, "failed": 1,
+                "message": f"Things3 DB unreadable: {e}"}
+
     if not tasks:
         log.info("Things3: No Today tasks to sync")
-        return 0, 0
+        return {"status": "no-tasks", "success": 0, "failed": 0,
+                "message": "Things3 Today list is empty"}
 
     log.info(f"Things3: Found {len(tasks)} Today tasks")
 
@@ -473,11 +514,13 @@ def sync_things3_tasks() -> tuple[int, int]:
         content = daily_note.read_text()
     except Exception as e:
         log.error(f"Failed to read daily note: {e}")
-        return 0, 1
+        return {"status": "read-failed", "success": 0, "failed": 1,
+                "message": f"Failed to read daily note: {e}"}
 
     if marker not in content:
         log.error(f"Marker '{marker}' not found in daily note")
-        return 0, 1
+        return {"status": "marker-missing", "success": 0, "failed": 1,
+                "message": f"Marker '{marker}' not found in daily note"}
 
     # Check if already synced
     marker_pos = content.find(marker)
@@ -494,7 +537,8 @@ def sync_things3_tasks() -> tuple[int, int]:
 
     if "- [ ]" in section_content or "- [x]" in section_content:
         log.info("Things3: Tasks already synced today, skipping")
-        return 0, 0
+        return {"status": "already-synced", "success": 0, "failed": 0,
+                "message": "Today's tasks were already written"}
 
     # Format tasks
     formatted_lines = [f"- [ ] {format_things3_task(t)}" for t in tasks]
@@ -527,10 +571,12 @@ def sync_things3_tasks() -> tuple[int, int]:
     try:
         daily_note.write_text(new_content)
         log.info(f"Things3: Wrote {len(tasks)} tasks to morningset")
-        return len(tasks), 0
+        return {"status": "ok", "success": len(tasks), "failed": 0,
+                "message": f"wrote {len(tasks)} task(s) to morningset"}
     except Exception as e:
         log.error(f"Failed to write Things3 tasks: {e}")
-        return 0, 1
+        return {"status": "write-failed", "success": 0, "failed": 1,
+                "message": f"Failed to write Things3 tasks: {e}"}
 
 
 WAIT5_PATTERN = re.compile(r"(\*\*Wait-5 Tally:\*\*\s*`)(\d+)(`)")
@@ -684,23 +730,17 @@ def mindful_params_from_query(path: str) -> dict:
 
 
 def sync_morning() -> dict:
-    """Run all morning sync tasks. Returns summary dict."""
-    results = {}
-
-    # Things3 first (tasks for the day)
-    things_success, things_fail = sync_things3_tasks()
-    results["things3"] = {"success": things_success, "failed": things_fail}
-
-    # iCloud files
-    icloud_success, icloud_fail = sync_icloud_files()
-    results["icloud"] = {"success": icloud_success, "failed": icloud_fail}
-
-    total_success = things_success + icloud_success
-    total_fail = things_fail + icloud_fail
-    results["total"] = {"success": total_success, "failed": total_fail}
-
+    """Run all morning sync tasks. Returns summary dict with sub-statuses."""
+    things_result = sync_things3_tasks()
+    icloud_result = sync_icloud_files()
+    total_success = things_result["success"] + icloud_result["success"]
+    total_fail = things_result["failed"] + icloud_result["failed"]
     log.info(f"Morning sync complete: {total_success} succeeded, {total_fail} failed")
-    return results
+    return {
+        "things3": things_result,
+        "icloud": icloud_result,
+        "total": {"success": total_success, "failed": total_fail},
+    }
 
 
 # --- Health data processing ---
@@ -1102,6 +1142,78 @@ def sync_oura_retry() -> tuple[bool, str]:
     return sync_oura()
 
 
+# --- Today's priorities (Watch-side read) ---
+
+_PRIORITY_LINE = re.compile(
+    r"^\s*\d+\.\s*(?:\[(?P<check>[ xX])\])?\s*(?P<text>.*?)\s*$"
+)
+
+
+def get_today_priorities() -> tuple[bool, dict]:
+    """Read the Three Priorities section for a Watch Shortcut to speak.
+
+    Returns (ok, {status, date, priorities:[{text,done}], speech}). A missing
+    note or missing marker are non-ok with a distinct status so the Shortcut
+    can say something specific instead of falling back to a generic error.
+    """
+    daily_note = get_daily_note_path()
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    if not daily_note.exists():
+        return False, {"status": "note-missing", "date": date_str,
+                       "message": f"Daily note not found: {daily_note.name}"}
+
+    try:
+        content = daily_note.read_text()
+    except Exception as e:
+        return False, {"status": "read-failed", "date": date_str,
+                       "message": f"Failed to read daily note: {e}"}
+
+    marker = SECTIONS["priorities"]["marker"]
+    if marker not in content:
+        return False, {"status": "marker-missing", "date": date_str,
+                       "message": f"Marker '{marker}' not found in daily note"}
+
+    marker_pos = content.find(marker)
+    line_end = content.find("\n", marker_pos)
+    if line_end == -1:
+        line_end = len(content)
+    else:
+        line_end += 1
+    rest = content[line_end:]
+
+    priorities: list[dict] = []
+    for raw in rest.split("\n"):
+        stripped = raw.strip()
+        # Stop at the next section boundary.
+        if stripped.startswith("**") or stripped.startswith("## ") or stripped == "---":
+            break
+        m = _PRIORITY_LINE.match(raw)
+        if not m:
+            continue
+        text = m.group("text").strip()
+        if not text:
+            continue  # empty placeholder like "1." or "2. [ ]"
+        priorities.append({"text": text, "done": m.group("check") in ("x", "X")})
+
+    if not priorities:
+        speech = "No priorities set today."
+    else:
+        ordinals = ["One", "Two", "Three", "Four", "Five"]
+        parts = []
+        for i, p in enumerate(priorities):
+            label = ordinals[i] if i < len(ordinals) else f"Number {i+1}"
+            suffix = " (done)" if p["done"] else ""
+            parts.append(f"{label}, {p['text']}{suffix}.")
+        speech = " ".join(parts)
+
+    return True, {
+        "status": "ok",
+        "date": date_str,
+        "priorities": priorities,
+        "speech": speech,
+    }
+
+
 class LogHandler(BaseHTTPRequestHandler):
     """HTTP request handler for log entries."""
 
@@ -1141,29 +1253,46 @@ class LogHandler(BaseHTTPRequestHandler):
         elif self.path == "/sync/oura/retry":
             success, message = sync_oura_retry()
             self._send_json(200 if success else 500, {"status": "ok" if success else "error", "message": message})
+        elif self.path == "/today/priorities":
+            success, result = get_today_priorities()
+            # note-missing is a legit "nothing to say yet" state, not a server error.
+            http_status = 200 if success or result.get("status") == "note-missing" else 500
+            self._send_json(http_status, result)
         else:
-            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, /today/priorities, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
 
     def do_POST(self):
         """Handle all POST endpoints."""
         _record_shortcut_checkin(self.client_address[0], self.path)
+        # Statuses that indicate real breakage (as opposed to legit no-ops
+        # like "no-tasks" / "already-synced" / "no-files"). Anything in this
+        # set gets an HTTP 500 so heartbeats can tell trouble from silence.
+        error_statuses = {
+            "db-read-failed", "marker-missing", "read-failed", "write-failed",
+            "note-missing", "config-missing", "all-failed",
+        }
+
         # Sync endpoints (no body required)
         if self.path == "/sync/things3":
             log.info("Sync: Things3")
-            success, fail = sync_things3_tasks()
-            self._send_json(200, {"status": "ok", "success": success, "failed": fail})
+            result = sync_things3_tasks()
+            http = 500 if result["status"] in error_statuses else 200
+            self._send_json(http, result)
             return
 
         if self.path == "/sync/icloud":
             log.info("Sync: iCloud files")
-            success, fail = sync_icloud_files()
-            self._send_json(200, {"status": "ok", "success": success, "failed": fail})
+            result = sync_icloud_files()
+            http = 500 if result["status"] in error_statuses else 200
+            self._send_json(http, result)
             return
 
         if self.path == "/sync/morning":
             log.info("Sync: Morning (Things3 + iCloud)")
             results = sync_morning()
-            self._send_json(200, {"status": "ok", **results})
+            any_error = (results["things3"]["status"] in error_statuses
+                         or results["icloud"]["status"] in error_statuses)
+            self._send_json(500 if any_error else 200, results)
             return
 
         if self.path == "/sync/oura":
@@ -1192,7 +1321,7 @@ class LogHandler(BaseHTTPRequestHandler):
 
         # Endpoints requiring a body
         if self.path not in ("/obsidian/daily", "/obsidian/health", "/mindful"):
-            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, /today/priorities, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
             return
 
         content_length = int(self.headers.get("Content-Length", 0))

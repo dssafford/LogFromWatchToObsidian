@@ -105,17 +105,20 @@ working fine from a terminal. The Mac Studio **has** the grant — verified, bot
 `logfromwatch` and `logserver` read Today tasks under launchd. A machine without
 it will fail silently.
 
-**Silently is the operative word.** `/sync/things3` returns the same body for a
-hard failure and a successful no-op:
+**No longer silent.** `/sync/things3`, `/sync/icloud`, and `/sync/morning`
+now return a `status` field that distinguishes real failures from legit
+no-ops, with HTTP 500 for the former:
 
 ```
-{"status":"ok","success":0,"failed":0}   # DB read failed
-{"status":"ok","success":0,"failed":0}   # worked, already synced today
+{"status":"db-read-failed","success":0,"failed":1,"message":"..."}  # HTTP 500
+{"status":"no-tasks","success":0,"failed":0,"message":"..."}          # HTTP 200
+{"status":"already-synced","success":0,"failed":0,"message":"..."}    # HTTP 200
+{"status":"ok","success":3,"failed":0,"message":"..."}                # HTTP 200
 ```
 
-The response cannot distinguish them — only `/tmp/logserver.stderr.log` can.
-That ambiguity is worth fixing if this bites again; until then, check the log
-rather than trusting a `success: 0`.
+iCloud uses the same shape with `no-files` / `partial` / `all-failed`.
+A `Things3DbError` is raised inside `get_things3_today_tasks` so DB failure
+can't fall through as an empty list any more.
 
 ### Mindful moments (GET or POST)
 
@@ -166,6 +169,8 @@ return "marker not found". The last note containing them is `2026-07-01.md`.
 - `POST /sync/things3` — pull Today tasks into morningset
 - `POST /sync/icloud` — process pending iCloud JSON files
 - `POST /sync/morning` — runs Things3 + iCloud together
+- `GET /today/priorities` — read today's Three Priorities as JSON, including
+  a `speech` string a Watch Shortcut can pass straight to "Speak Text"
 
 ## WindowServer Memory Monitoring
 
