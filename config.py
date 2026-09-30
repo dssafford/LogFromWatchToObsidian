@@ -10,6 +10,12 @@ ICLOUD_INPUT_FOLDERS = [
 ]
 LOG_FILE = Path("/tmp/log-to-obsidian.log")
 
+# Local Ollama model used by GET /summarize.
+OLLAMA_URL = "http://localhost:11434"
+SUMMARIZE_MODEL = "cruiserein/Qwen3.8-27B:latest"
+SUMMARIZE_MAX_TOKENS = 200
+SUMMARIZE_TIMEOUT_S = 30
+
 # Format types
 FORMAT_PLAIN = "plain"           # Just the text
 FORMAT_BLOCKQUOTE = "blockquote" # > text

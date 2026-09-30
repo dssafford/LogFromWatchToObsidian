@@ -29,6 +29,7 @@ import things
 
 from config import DAILY_NOTES_FOLDER, TEMPLATE_PATH, SECTIONS, LOG_FILE, ICLOUD_INPUT_FOLDERS
 from config import FORMAT_PLAIN, FORMAT_BLOCKQUOTE, FORMAT_BULLET, FORMAT_NUMBERED, FORMAT_CHECKBOX, FORMAT_BULLET_CHECKBOX
+from config import OLLAMA_URL, SUMMARIZE_MODEL, SUMMARIZE_MAX_TOKENS, SUMMARIZE_TIMEOUT_S
 from mindful import (
     MINDFUL_WORDS, MOOD_WORDS,
     compose_line, parse_dictation, normalize_time, extract_leading_time,
@@ -1214,6 +1215,112 @@ def get_today_priorities() -> tuple[bool, dict]:
     }
 
 
+def _extract_section_text(content: str, marker: str) -> str | None:
+    """Return the text under `marker`, up to the next `## ` heading or `---`.
+
+    None if the marker isn't present. Empty string if the marker is present
+    but the section is empty. Leading/trailing blank lines are stripped so
+    the summarizer sees only the log body.
+    """
+    if marker not in content:
+        return None
+    marker_pos = content.find(marker)
+    line_end = content.find("\n", marker_pos)
+    if line_end == -1:
+        return ""
+    lines = content[line_end + 1:].split("\n")
+    body: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## ") or stripped == "---":
+            break
+        body.append(line)
+    return "\n".join(body).strip()
+
+
+def _call_ollama_chat(model: str, messages: list[dict],
+                      num_predict: int, timeout: float) -> tuple[bool, str]:
+    """POST to Ollama /api/chat with think=False. (ok, content_or_error_msg)."""
+    from urllib import request, error
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "options": {"num_predict": num_predict, "temperature": 0.3},
+    }).encode()
+    req = request.Request(
+        f"{OLLAMA_URL}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except (error.URLError, ConnectionRefusedError, TimeoutError) as e:
+        return False, f"ollama unreachable: {e}"
+    except Exception as e:
+        return False, f"ollama call failed: {e}"
+    content = (data.get("message") or {}).get("content", "").strip()
+    if not content:
+        return False, "empty response from model"
+    return True, content
+
+
+def summarize_today_log() -> tuple[bool, dict]:
+    """Ask the local Qwen model to summarize today's Daily Log section.
+
+    Returns (ok, {status, date, summary, speech, ...}). Statuses:
+      ok / empty-log        — normal, HTTP 200
+      model-unavailable     — Ollama not running or model missing; HTTP 200
+                              so the Watch reads a graceful message
+      note-missing          — no daily note yet today; HTTP 200
+      marker-missing        — note exists but no Daily Log header; HTTP 500
+      read-failed           — filesystem error; HTTP 500
+    """
+    daily_note = get_daily_note_path()
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    if not daily_note.exists():
+        return False, {"status": "note-missing", "date": date_str,
+                       "message": f"Daily note not found: {daily_note.name}"}
+    try:
+        content = daily_note.read_text()
+    except Exception as e:
+        return False, {"status": "read-failed", "date": date_str,
+                       "message": f"Failed to read daily note: {e}"}
+
+    marker = SECTIONS["log"]["marker"]
+    section_text = _extract_section_text(content, marker)
+    if section_text is None:
+        return False, {"status": "marker-missing", "date": date_str,
+                       "message": f"Marker '{marker}' not found in daily note"}
+    if not section_text:
+        return True, {"status": "empty-log", "date": date_str,
+                      "summary": "", "speech": "Nothing logged yet today."}
+
+    system = (
+        "You summarize the user's daily log for text-to-speech playback on an "
+        "Apple Watch. Keep it under 60 words, natural spoken tone, no bullet "
+        "points or lists. Focus on themes, moods, or notable moments. Do not "
+        "repeat entries verbatim. Answer with only the summary sentence(s), "
+        "no preamble."
+    )
+    user = f"Today's log:\n\n{section_text}"
+    ok, result = _call_ollama_chat(
+        SUMMARIZE_MODEL,
+        [{"role": "system", "content": system},
+         {"role": "user", "content": user}],
+        SUMMARIZE_MAX_TOKENS,
+        SUMMARIZE_TIMEOUT_S,
+    )
+    if not ok:
+        return False, {"status": "model-unavailable", "date": date_str,
+                       "summary": "", "speech": "Summary unavailable.",
+                       "message": result}
+    return True, {"status": "ok", "date": date_str,
+                  "summary": result, "speech": result}
+
+
 class LogHandler(BaseHTTPRequestHandler):
     """HTTP request handler for log entries."""
 
@@ -1258,8 +1365,15 @@ class LogHandler(BaseHTTPRequestHandler):
             # note-missing is a legit "nothing to say yet" state, not a server error.
             http_status = 200 if success or result.get("status") == "note-missing" else 500
             self._send_json(http_status, result)
+        elif self.path == "/summarize":
+            success, result = summarize_today_log()
+            # note-missing + model-unavailable are legit "speak something graceful"
+            # states — HTTP 200 so the Watch reads the fallback instead of erroring.
+            soft = {"note-missing", "model-unavailable"}
+            http_status = 200 if success or result.get("status") in soft else 500
+            self._send_json(http_status, result)
         else:
-            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, /today/priorities, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
+            self._send_response(404, "Endpoints: GET /health, /mindful?kind=&mood=&intensity=&text=, /sync/oura, /sync/oura/retry, /today/priorities, /summarize, POST /mindful, /obsidian/daily, /obsidian/health, /sync/things3, /sync/icloud, /sync/morning")
 
     def do_POST(self):
         """Handle all POST endpoints."""
